@@ -42,9 +42,12 @@ curl -X POST http://localhost:3000/parse \
 
 | Event      | Payload |
 |------------|---------|
-| `progress` | `{ done, total, percent }` |
-| `done`     | `{ results: SentenceResult[] }` |
+| `result`   | `{ index: number; result: SentenceResult }` — emitted per sentence as it completes |
+| `progress` | `{ done, total, percent }` — emitted after each sentence |
+| `done`     | `{ results: SentenceResult[] }` — full array on completion |
 | `error`    | error message string |
+
+`result` events arrive incrementally; clients that only need the full batch can ignore them and use `done`.
 
 **`SentenceResult`:**
 

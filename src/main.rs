@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 use tokenizers::Tokenizer;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing::info;
 
 mod decode;
@@ -92,6 +92,17 @@ struct ProgressEvent {
 #[derive(Serialize)]
 struct DoneEvent {
     results: Vec<SentenceResult>,
+}
+
+#[derive(Serialize)]
+struct ResultEvent<'a> {
+    index: usize,
+    result: &'a SentenceResult,
+}
+
+struct SentenceJob {
+    sentence: String,
+    reply: oneshot::Sender<anyhow::Result<SentenceResult>>,
 }
 
 // vocabs.json stores { label: index } dicts; invert to index-keyed Vec<String>.
@@ -182,6 +193,7 @@ struct AppState {
     lexicon: Vec<matcher::Entry>,
     classifier: IdiomClassifier,
     phrasal: phrasal::PhrasalLexicon,
+    job_tx: mpsc::UnboundedSender<SentenceJob>,
 }
 
 fn idle_unload_secs() -> u64 {
@@ -203,6 +215,23 @@ fn spawn_evictor(state: Weak<AppState>) {
     });
 }
 
+/// Dedicated std thread that owns the inference loop.
+/// Processes one sentence at a time from the shared job channel, releases the
+/// session lock between sentences so the evictor can still run.
+fn spawn_inference_worker(
+    state: Arc<AppState>,
+    mut rx: mpsc::UnboundedReceiver<SentenceJob>,
+) {
+    std::thread::spawn(move || {
+        while let Some(job) = rx.blocking_recv() {
+            let result = state.session.with_session(|session| {
+                run_inference(session, &state, &job.sentence)
+            });
+            let _ = job.reply.send(result);
+        }
+    });
+}
+
 // --- handlers ---
 
 async fn health() -> &'static str {
@@ -215,55 +244,73 @@ async fn parse_batch(
 ) -> impl IntoResponse {
     let total = req.sentences.len();
 
-    let (tx, rx) = mpsc::unbounded_channel::<Event>();
+    let (sse_tx, sse_rx) = mpsc::unbounded_channel::<Event>();
 
-    // spawn inference in blocking thread
-    tokio::task::spawn_blocking(move || {
-        // Empty batch: don't trigger a model load just to do nothing.
+    tokio::spawn(async move {
         if total == 0 {
             let done_data =
                 serde_json::to_string(&DoneEvent { results: vec![] }).unwrap_or_default();
-            let _ = tx.send(Event::default().event("done").data(done_data));
+            let _ = sse_tx.send(Event::default().event("done").data(done_data));
             return;
         }
 
-        let result = state.session.with_session(|session| {
-            let mut results: Vec<SentenceResult> = Vec::with_capacity(total);
-            let mut last_report = Instant::now();
-
-            for (i, sentence) in req.sentences.iter().enumerate() {
-                let parsed = run_inference(session, &state, sentence.trim())
-                    .map_err(|e| anyhow::anyhow!("sentence {i}: {e}"))?;
-                results.push(parsed);
-
-                // report progress once per second
-                if last_report.elapsed() >= Duration::from_secs(1) || i + 1 == total {
-                    let done = i + 1;
-                    let percent = (done * 100 / total) as u8;
-                    let progress =
-                        serde_json::to_string(&ProgressEvent { done, total, percent })
-                            .unwrap_or_default();
-                    let _ = tx.send(Event::default().event("progress").data(progress));
-                    last_report = Instant::now();
-                }
+        // Submit every sentence as an independent job and remember the reply channels
+        // in order. Jobs from concurrent requests are interleaved in the shared worker
+        // queue, so no single request holds the model lock for its entire batch.
+        let mut receivers = Vec::with_capacity(total);
+        for sentence in &req.sentences {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            if state
+                .job_tx
+                .send(SentenceJob {
+                    sentence: sentence.trim().to_string(),
+                    reply: reply_tx,
+                })
+                .is_err()
+            {
+                let _ = sse_tx
+                    .send(Event::default().event("error").data("inference worker stopped"));
+                return;
             }
-            Ok(results)
-        });
-
-        match result {
-            Ok(results) => {
-                let done_data =
-                    serde_json::to_string(&DoneEvent { results }).unwrap_or_default();
-                let _ = tx.send(Event::default().event("done").data(done_data));
-            }
-            Err(e) => {
-                let _ = tx.send(Event::default().event("error").data(format!("{e}")));
-            }
+            receivers.push(reply_rx);
         }
+
+        let mut results: Vec<SentenceResult> = Vec::with_capacity(total);
+        for (i, reply_rx) in receivers.into_iter().enumerate() {
+            let sentence_result = match reply_rx.await {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
+                    let _ = sse_tx
+                        .send(Event::default().event("error").data(format!("sentence {i}: {e}")));
+                    return;
+                }
+                Err(_) => {
+                    let _ = sse_tx
+                        .send(Event::default().event("error").data("inference worker dropped"));
+                    return;
+                }
+            };
+
+            // Per-sentence result event (clients that don't need it can ignore it).
+            let result_data =
+                serde_json::to_string(&ResultEvent { index: i, result: &sentence_result })
+                    .unwrap_or_default();
+            let _ = sse_tx.send(Event::default().event("result").data(result_data));
+
+            let done = i + 1;
+            let percent = (done * 100 / total) as u8;
+            let progress =
+                serde_json::to_string(&ProgressEvent { done, total, percent }).unwrap_or_default();
+            let _ = sse_tx.send(Event::default().event("progress").data(progress));
+
+            results.push(sentence_result);
+        }
+
+        let done_data = serde_json::to_string(&DoneEvent { results }).unwrap_or_default();
+        let _ = sse_tx.send(Event::default().event("done").data(done_data));
     });
 
-    // convert channel into SSE stream
-    let sse_stream = Box::pin(stream::unfold(rx, |mut rx| async move {
+    let sse_stream = Box::pin(stream::unfold(sse_rx, |mut rx| async move {
         rx.recv()
             .await
             .map(|event| (Ok::<Event, std::convert::Infallible>(event), rx))
@@ -602,6 +649,8 @@ async fn main() -> anyhow::Result<()> {
     let tokenizer = Tokenizer::from_file("model/tokenizer.json")
         .map_err(|e| anyhow::anyhow!("tokenizer: {}", e))?;
 
+    let (job_tx, job_rx) = mpsc::unbounded_channel::<SentenceJob>();
+
     let state = Arc::new(AppState {
         session: LazySession::new(),
         tokenizer,
@@ -610,9 +659,11 @@ async fn main() -> anyhow::Result<()> {
         lexicon: lexicon.lexicon,
         classifier,
         phrasal,
+        job_tx,
     });
 
     spawn_evictor(Arc::downgrade(&state));
+    spawn_inference_worker(Arc::clone(&state), job_rx);
     info!(
         idle_unload_secs = idle_unload_secs(),
         lexicon = state.lexicon.len(),
@@ -656,6 +707,7 @@ mod e2e {
         let phrasal = phrasal::PhrasalLexicon::load(PHRASAL_PATH)?;
         let tokenizer = Tokenizer::from_file("model/tokenizer.json")
             .map_err(|e| anyhow::anyhow!("tokenizer: {}", e))?;
+        let (job_tx, _job_rx) = mpsc::unbounded_channel();
         Ok(AppState {
             session: LazySession::new(),
             tokenizer,
@@ -664,6 +716,7 @@ mod e2e {
             lexicon: lexicon.lexicon,
             classifier,
             phrasal,
+            job_tx,
         })
     }
 
