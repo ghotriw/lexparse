@@ -460,6 +460,11 @@ fn run_inference(
         if !matches!(upos_str(head).as_str(), "VERB" | "AUX") {
             continue;
         }
+        // Infinitive "to" (PART) precedes its verb head — not a particle.
+        // Real phrasal verb particles always follow the verb in word order.
+        if i < head {
+            continue;
+        }
         if let Some(preps) = state.phrasal.resolve(&words[head - 1], &words[i - 1]) {
             let (prep, prep_id) = find_prep(head, i, &preps);
             phrasal_verbs.push(PhrasalVerb {
@@ -711,11 +716,21 @@ mod e2e {
     }
 
     // Phrasal verb detection golden cases.
-    const PHRASAL_CASES: &[(&str, &str, &str)] = &[
-        ("She came up with a great idea.", "come", "up"),
-        ("He gave up smoking last year.", "give", "up"),
-        ("They put up with the noise.", "put", "up"),
-        ("Please turn off the lights.", "turn", "off"),
+    // (sentence, verb lemma, particle, prep)
+    const PHRASAL_CASES: &[(&str, &str, &str, Option<&str>)] = &[
+        ("She came up with a great idea.", "come", "up", Some("with")),
+        ("He gave up smoking last year.", "give", "up", None),
+        ("They put up with the noise.", "put", "up", Some("with")),
+        ("Please turn off the lights.", "turn", "off", None),
+    ];
+
+    // False positive cases: no phrasal verb should be detected.
+    // TODO: "hold to" fires because the infinitive marker "to" (PART → hold VERB)
+    // matches the second-pass arc+inventory check — fix the detector.
+    const PHRASAL_FALSE_POSITIVES: &[(&str, &str, &str)] = &[
+        ("Kyiv should focus on defense and carefully determine which positions are truly necessary to hold.", "hold", "to"),
+        ("Ukraine's broader goal is to turn Pokrovsk.", "turn", "to"),
+        ("In order to push them out of the Hryshyne area.", "push", "in"),
     ];
 
     #[test]
@@ -725,24 +740,46 @@ mod e2e {
         state
             .session
             .with_session(|session| {
-                for &(sent, verb_kw, particle) in PHRASAL_CASES {
+                for &(sent, verb_kw, particle, prep) in PHRASAL_CASES {
                     let result = run_inference(session, &state, sent)
                         .unwrap_or_else(|e| panic!("inference failed for {:?}: {}", sent, e));
 
                     let found = result.phrasal_verbs.iter().any(|pv| {
-                        normalize::lemma(&pv.verb) == verb_kw && pv.particle == particle
+                        normalize::lemma(&pv.verb) == verb_kw
+                            && pv.particle == particle
+                            && pv.prep.as_deref() == prep
                     });
                     assert!(
                         found,
-                        "expected phrasal verb ({}, {}) in {:?}\n  got: {:?}",
+                        "expected phrasal verb ({}, {}, {:?}) in {:?}\n  got: {:?}",
                         verb_kw,
                         particle,
+                        prep,
                         sent,
                         result
                             .phrasal_verbs
                             .iter()
-                            .map(|pv| format!("{}+{}", pv.verb, pv.particle))
+                            .map(|pv| format!(
+                                "{}+{}{}",
+                                pv.verb,
+                                pv.particle,
+                                pv.prep.as_deref().map(|p| format!("+{p}")).unwrap_or_default()
+                            ))
                             .collect::<Vec<_>>()
+                    );
+                }
+
+                for &(sent, verb_kw, particle) in PHRASAL_FALSE_POSITIVES {
+                    let result = run_inference(session, &state, sent)
+                        .unwrap_or_else(|e| panic!("inference failed for {:?}: {}", sent, e));
+
+                    let fp = result.phrasal_verbs.iter().find(|pv| {
+                        normalize::lemma(&pv.verb) == verb_kw && pv.particle == particle
+                    });
+                    assert!(
+                        fp.is_none(),
+                        "false positive phrasal verb ({}, {}) should not be detected in {:?}",
+                        verb_kw, particle, sent
                     );
                 }
                 Ok(())
