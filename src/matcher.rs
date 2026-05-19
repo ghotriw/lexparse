@@ -5,7 +5,7 @@
 //! the content-word token indices the idiom occupies. Discontinuous spans fall
 //! out naturally; the returned indices are the FIXED content words only.
 
-use crate::normalize::{lemma, lemma_pos};
+use crate::normalize::lemma_pos;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -55,8 +55,13 @@ pub struct Lexicon {
 }
 
 /// Lemmatize every token (one match key per surface token). POS-free.
+/// Test-only: the runtime serve path is POS-gated (`lemmatize_pos`) and Rust
+/// never builds the lexicon (that is Python's `build_lexicon.py`), so this has
+/// no production caller — it survives as the POS-free reference for the
+/// matcher's golden/regression tests, mirroring Python `matcher.lemmatize`.
+#[cfg(test)]
 pub fn lemmatize(tokens: &[String]) -> Vec<String> {
-    tokens.iter().map(|t| lemma(t)).collect()
+    tokens.iter().map(|t| crate::normalize::lemma(t)).collect()
 }
 
 /// POS-aware lemmatize: `is_verb[i]` (from model-predicted UPOS) enables the
