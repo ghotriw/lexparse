@@ -2,25 +2,16 @@
 
 Lightweight English NLP microservice: dependency parsing, POS tagging, phrasal verb and idiom detection.
 
-Built with Rust + ONNX Runtime. Model: [ghotriw/deberta-v3-small-biaffine-dep-pos-en](https://huggingface.co/ghotriw/deberta-v3-small-biaffine-dep-pos-en).
+Built with Rust + ONNX Runtime.
+
+| Model | Size | HuggingFace |
+|-------|------|-------------|
+| deberta-v3-**small** | faster, less RAM | [ghotriw/deberta-v3-small-biaffine-dep-pos-en](https://huggingface.co/ghotriw/deberta-v3-small-biaffine-dep-pos-en) |
+| deberta-v3-**base** | more accurate | [ghotriw/deberta-v3-base-biaffine-dep-pos-en](https://huggingface.co/ghotriw/deberta-v3-base-biaffine-dep-pos-en) |
 
 ## Setup
 
 ### 1. Download model artifacts
-
-Via `hf` CLI:
-
-```bash
-hf download ghotriw/deberta-v3-small-biaffine-dep-pos-en \
-  model.fp16.onnx vocabs.json idiom_classifier.json tokenizer.json \
-  --local-dir model/
-
-hf download ghotriw/deberta-v3-small-biaffine-dep-pos-en \
-  lexicon.json phrasal-verbs.json \
-  --local-dir dic/
-```
-
-Or via the included script (requires only `curl`):
 
 ```bash
 ./download_models.sh
