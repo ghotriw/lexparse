@@ -1,0 +1,5 @@
+target/
+model/
+dic/
+
+.DS_Store
