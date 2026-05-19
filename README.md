@@ -8,14 +8,22 @@ Built with Rust + ONNX Runtime. Model: [ghotriw/deberta-v3-small-biaffine-dep-po
 
 ### 1. Download model artifacts
 
+Via `hf` CLI:
+
 ```bash
 hf download ghotriw/deberta-v3-small-biaffine-dep-pos-en \
-  model.fp16.onnx vocabs.json idiom_classifier.json \
+  model.fp16.onnx vocabs.json idiom_classifier.json tokenizer.json \
   --local-dir model/
 
 hf download ghotriw/deberta-v3-small-biaffine-dep-pos-en \
   lexicon.json phrasal-verbs.json \
   --local-dir dic/
+```
+
+Or via the included script (requires only `curl`):
+
+```bash
+./download_models.sh
 ```
 
 ### 2. Build and run
@@ -62,6 +70,16 @@ curl -X POST http://localhost:3000/parse \
 ### `GET /health`
 
 Returns `ok`.
+
+## Testing
+
+```bash
+# Unit and lexicon-level tests (no model required)
+cargo test
+
+# Full regression tests including idiom and phrasal verb detection (requires model artifacts)
+cargo test -- --include-ignored
+```
 
 ## Configuration
 

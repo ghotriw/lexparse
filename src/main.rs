@@ -594,7 +594,7 @@ async fn main() -> anyhow::Result<()> {
     let phrasal = phrasal::PhrasalLexicon::load(PHRASAL_PATH)?;
 
     info!("loading tokenizer");
-    let tokenizer = Tokenizer::from_pretrained("deepset/deberta-v3-base-squad2", None)
+    let tokenizer = Tokenizer::from_file("model/tokenizer.json")
         .map_err(|e| anyhow::anyhow!("tokenizer: {}", e))?;
 
     let state = Arc::new(AppState {
@@ -627,4 +627,126 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+// --- end-to-end regression tests ---
+//
+// These tests require all model artifacts to be present:
+//   model/model.fp16.onnx   model/vocabs.json   model/idiom_classifier.json
+//   dic/lexicon.json         dic/phrasal-verbs.json
+//
+// Run with:
+//   cargo test -- --include-ignored
+//
+#[cfg(test)]
+mod e2e {
+    use super::*;
+
+    fn build_state() -> anyhow::Result<AppState> {
+        let vocab: Vocab =
+            serde_json::from_str::<VocabRaw>(&std::fs::read_to_string(VOCAB_PATH)?)?.into();
+        let lexicon: Lexicon = serde_json::from_str(&std::fs::read_to_string(LEXICON_PATH)?)?;
+        let classifier: IdiomClassifier =
+            serde_json::from_str(&std::fs::read_to_string(CLASSIFIER_PATH)?)?;
+        let phrasal = phrasal::PhrasalLexicon::load(PHRASAL_PATH)?;
+        let tokenizer = Tokenizer::from_file("model/tokenizer.json")
+            .map_err(|e| anyhow::anyhow!("tokenizer: {}", e))?;
+        Ok(AppState {
+            session: LazySession::new(),
+            tokenizer,
+            rels: vocab.rels,
+            upos: vocab.upos,
+            lexicon: lexicon.lexicon,
+            classifier,
+            phrasal,
+        })
+    }
+
+    // Idiom detection golden cases.
+    // Each tuple: (sentence, exact lexicon surface as returned by the model, expect_idiomatic).
+    // surface is the winning entry after overlap resolution — run with --nocapture to see
+    // what the model actually returns if a case starts failing.
+    const IDIOM_CASES: &[(&str, &str, bool)] = &[
+        ("You have an audition today? Break a leg!", "break a leg", true),
+        ("He spilled the beans about the surprise party.", "spill [pron] beans", true),
+        ("After years of hard work, she finally kicked the bucket.", "kick [pron] bucket", true),
+        // Literal use — the model should NOT flag this as idiomatic.
+        ("She broke her leg falling off the horse.", "break a leg", false),
+    ];
+
+    #[test]
+    #[ignore = "requires model artifacts; run with: cargo test -- --include-ignored"]
+    fn idiom_detection_golden_cases() {
+        let state = build_state().expect("failed to load model artifacts");
+        state
+            .session
+            .with_session(|session| {
+                for &(sent, surface, expect_idiomatic) in IDIOM_CASES {
+                    let result = run_inference(session, &state, sent)
+                        .unwrap_or_else(|e| panic!("inference failed for {:?}: {}", sent, e));
+
+                    let hit = result.idioms.iter().find(|m| m.surface == surface);
+
+                    match (hit, expect_idiomatic) {
+                        (None, true) => panic!(
+                            "expected idiom {:?} in {:?} but it was not detected",
+                            surface, sent
+                        ),
+                        (Some(m), true) => assert!(
+                            m.idiomatic,
+                            "expected idiomatic=true for {:?} in {:?} (prob={:.3})",
+                            m.surface, sent, m.prob
+                        ),
+                        (Some(m), false) => assert!(
+                            !m.idiomatic,
+                            "expected idiomatic=false for {:?} in {:?} (prob={:.3})",
+                            m.surface, sent, m.prob
+                        ),
+                        (None, false) => {} // not detected and not expected — ok
+                    }
+                }
+                Ok(())
+            })
+            .expect("session error");
+    }
+
+    // Phrasal verb detection golden cases.
+    const PHRASAL_CASES: &[(&str, &str, &str)] = &[
+        ("She came up with a great idea.", "come", "up"),
+        ("He gave up smoking last year.", "give", "up"),
+        ("They put up with the noise.", "put", "up"),
+        ("Please turn off the lights.", "turn", "off"),
+    ];
+
+    #[test]
+    #[ignore = "requires model artifacts; run with: cargo test -- --include-ignored"]
+    fn phrasal_verb_detection_golden_cases() {
+        let state = build_state().expect("failed to load model artifacts");
+        state
+            .session
+            .with_session(|session| {
+                for &(sent, verb_kw, particle) in PHRASAL_CASES {
+                    let result = run_inference(session, &state, sent)
+                        .unwrap_or_else(|e| panic!("inference failed for {:?}: {}", sent, e));
+
+                    let found = result.phrasal_verbs.iter().any(|pv| {
+                        normalize::lemma(&pv.verb) == verb_kw && pv.particle == particle
+                    });
+                    assert!(
+                        found,
+                        "expected phrasal verb ({}, {}) in {:?}\n  got: {:?}",
+                        verb_kw,
+                        particle,
+                        sent,
+                        result
+                            .phrasal_verbs
+                            .iter()
+                            .map(|pv| format!("{}+{}", pv.verb, pv.particle))
+                            .collect::<Vec<_>>()
+                    );
+                }
+                Ok(())
+            })
+            .expect("session error");
+    }
 }

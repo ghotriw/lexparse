@@ -182,9 +182,8 @@ mod tests {
     use crate::normalize::tokenize;
 
     fn load_lexicon() -> Vec<Entry> {
-        // cargo runs tests with CWD = crate root, where `model/` lives.
-        let raw = std::fs::read_to_string("model/lexicon.json")
-            .expect("model/lexicon.json (run tests from the project root)");
+        let raw = std::fs::read_to_string("dic/lexicon.json")
+            .expect("dic/lexicon.json not found (run tests from the project root)");
         serde_json::from_str::<Lexicon>(&raw).unwrap().lexicon
     }
 
@@ -235,6 +234,31 @@ mod tests {
         let toks = tokenize("Nothing idiomatic in this plain sentence.");
         let lem = lemmatize(&toks);
         assert!(scan(&lex, &lem).is_empty());
+    }
+
+    // Regression cases: full sentence with surrounding context. Verifies the
+    // scanner finds the idiom even when it is not the only clause in the sentence.
+    #[test]
+    fn scan_regression_cases() {
+        let lex = load_lexicon();
+
+        for (sent, expected_surface) in [
+            ("You have an audition today? Break a leg!", "break a leg"),
+            ("He spilled the beans about the surprise party.", "spill the beans"),
+            ("She was over the moon when she heard the news.", "over the moon"),
+            ("Don't let the cat out of the bag before the announcement.", "let the cat out of the bag"),
+            ("That new iPhone costs an arm and a leg.", "an arm and a leg"),
+        ] {
+            let toks = tokenize(sent);
+            let lem = lemmatize(&toks);
+            let hits = scan(&lex, &lem);
+            let surfaces: Vec<&str> = hits.iter().map(|(i, _)| lex[*i].surface.as_str()).collect();
+            assert!(
+                surfaces.contains(&expected_surface),
+                "expected surface {:?} in {:?}\n  sentence: {}",
+                expected_surface, surfaces, sent,
+            );
+        }
     }
 
     #[test]
