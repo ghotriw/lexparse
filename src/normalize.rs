@@ -1,19 +1,98 @@
-//! Bit-exact Rust port of `py_example/normalize.py` (anti-skew §7).
+//! Bit-exact Rust port of `stage2_idiom/normalize.py` (anti-skew §7).
 //!
 //! This is the SINGLE source of truth for how raw text is split into words and
 //! how each word is normalized to a match key. `tokenize` here defines the grid
 //! rows / word indices the parser encoder sees, and `lemma` defines which words
 //! the idiom matcher pools. Any divergence from the Python reference re-introduces
 //! train/serve skew upstream of the frozen encoder — do not "improve" the rules.
+//!
+//! Tokenizer = PTB/UD reproducing UD_English-EWT (~10% residual mismatch, of
+//! which ~half is Class 8 deferred / EWT annotation noise). Two stages:
+//!   Stage A — one big regex find_iter, ordered longest-first.
+//!   Stage B — procedural contraction split on apostrophe-bearing tokens
+//!     (n't / 's / 'm / 'd / 're / 've / 'll, plus the apostrophe-less PTB
+//!     special `cannot → can + not`). Apostrophe-less pseudo-contractions
+//!     (its / dont / im — EWT typo-normalization) are NOT split.
+//!
+//! Both stages use only the Python `re` ∩ Rust `regex` intersection: no
+//! lookaround, no backrefs. Parity vs Python verified by harness over the
+//! full EWT corpus.
 
 use regex::Regex;
 use std::sync::OnceLock;
 
-/// Word = a run of ASCII letters/digits/apostrophe/hyphen, OR a single
-/// non-space, non-ASCII-alnum char. Mirrors `normalize._TOKEN_RE`.
+/// Hybrid abbreviation list (EWT multi-letter ∪ standard English). Lowercase.
+/// MUST stay bit-identical to `normalize._HYBRID_ABBREV_LC`.
+const HYBRID_ABBREV_LC: &[&str] = &[
+    // titles
+    "mr", "mrs", "ms", "dr", "drs", "prof", "sr", "jr", "st", "sts",
+    "rev", "capt", "gen", "lt", "col", "sgt", "cpl", "cmdr", "gov",
+    "sen", "rep", "pres", "supt", "det", "atty", "ofc", "mt", "pvt",
+    // corp / org
+    "inc", "corp", "co", "ltd", "llc", "plc", "bros", "assn", "dept",
+    "univ", "intl", "conf",
+    // months
+    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept",
+    "oct", "nov", "dec",
+    // weekdays
+    "mon", "tue", "tues", "wed", "thu", "thur", "thurs", "fri", "sat", "sun",
+    // latin / generic
+    "etc", "vs", "ie", "eg", "cf", "al", "viz", "ca", "ibid", "et", "circa",
+    // measure / misc
+    "no", "nos", "vol", "ch", "pp", "pg", "fig", "figs", "ed", "eds",
+    "trans", "sec", "approx", "wkly", "mo", "yr", "yrs",
+    "ave", "blvd", "rd", "ln", "pl", "ft", "ext",
+    // US/Canadian state/province
+    "ala", "ariz", "ark", "calif", "colo", "conn", "del", "fla", "ga",
+    "ill", "ind", "kan", "ky", "la", "mass", "mich", "minn", "miss",
+    "mont", "neb", "nev", "okla", "ore", "pa", "tenn", "tex", "va",
+    "vt", "wash", "wis", "wyo", "ont", "que", "alb",
+    // EWT-only (web text)
+    "aplo", "arrv", "attn", "dom", "ect", "esp", "eve", "fax", "info",
+    "lb", "lv", "mins", "mob", "oz", "para", "ph", "pop", "ps", "rec",
+    "reps", "spec", "wa", "est",
+];
+
+/// Productive English prefix list — keep `co-workers`, `non-Microsoft`, etc.
+/// joined while letting `15-year`, `wheel-chair`, `F-16` split per EWT.
+const PRODUCTIVE_PREFIXES: &[&str] = &[
+    "co", "non", "anti", "pre", "post", "mid", "pro", "e", "ex", "mis",
+    "counter", "semi", "sub", "super", "re", "un", "multi", "inter", "intra",
+    "trans", "over", "under", "self", "near", "all", "cross", "pseudo",
+    "quasi", "neo",
+];
+
 fn token_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"[A-Za-z0-9]+(?:['’\-][A-Za-z0-9]+)*|[^\sA-Za-z0-9]").unwrap())
+    RE.get_or_init(|| {
+        let mut abbr: Vec<&&str> = HYBRID_ABBREV_LC.iter().collect();
+        abbr.sort_by_key(|s| (-(s.len() as i64), s.to_string()));
+        let abbr_alt: String = abbr.iter().map(|s| **s).collect::<Vec<&str>>().join("|");
+        let prefix_alt = PRODUCTIVE_PREFIXES.join("|");
+        let pattern = format!(
+            concat!(
+                r"https?://\S+",
+                r"|www\.[A-Za-z0-9][A-Za-z0-9.\-]*",
+                r"|[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+",
+                r"|(?:[A-Za-z]\.){{2,}}",
+                r"|(?i:{abbr})\.",
+                r"|[A-Z]\.",
+                r"|\d+(?:[.,:/]\d+)+",
+                r"|\d+(?:-\d+){{2,}}",
+                r"|['’]\d+(?:[A-Za-z]+)?",
+                r"|\.{{2,}}",
+                r"|…",
+                r"|-{{2,}}",
+                r"|\*{{2,}}",
+                r"|(?i:{prefix})-[A-Za-z]+(?:['’][A-Za-z0-9]+)*",
+                r"|[A-Za-z0-9]+(?:['’][A-Za-z0-9]+)*",
+                r"|[^\sA-Za-z0-9]",
+            ),
+            abbr = abbr_alt,
+            prefix = prefix_alt,
+        );
+        Regex::new(&pattern).expect("token_re compile")
+    })
 }
 
 /// `^[\[(<⟨].*[\])>⟩]$` — bracketed/parenthesized lexicon-surface token.
@@ -31,12 +110,72 @@ const SLOT_WORDS: &[&str] = &[
     "your", "yours", "yourself", "pron", "poss", "x", "y", "z",
 ];
 
-/// Canonical Stage-2 word tokenization. Original case preserved.
+/// Canonical Stage-2 word tokenization (PTB/UD reproducing UD_English-EWT).
+/// Original case preserved; bit-identical to Python `normalize.tokenize`.
 pub fn tokenize(text: &str) -> Vec<String> {
-    token_re()
-        .find_iter(text)
-        .map(|m| m.as_str().to_string())
-        .collect()
+    let mut out: Vec<String> = Vec::new();
+    for m in token_re().find_iter(text) {
+        split_contraction(m.as_str(), &mut out);
+    }
+    out
+}
+
+/// Stage B: recursive contraction split applied to each Stage-A token.
+/// `'s 'm 'd 're 've 'll` clitics and `n't` split off; `cannot → can + not`.
+/// Apostrophe-less surfaces (its / dont / im) are NOT split.
+fn split_contraction(tok: &str, out: &mut Vec<String>) {
+    let chars: Vec<char> = tok.chars().collect();
+    let low: String = chars.iter().flat_map(|c| c.to_lowercase()).collect();
+
+    // Apostrophe-less PTB split — cannot → can + not (case preserved by slice).
+    if low == "cannot" {
+        out.push(chars[..3].iter().collect());
+        out.push(chars[3..].iter().collect());
+        return;
+    }
+    if !low.contains('\'') && !low.contains('’') {
+        out.push(tok.to_string());
+        return;
+    }
+
+    // n't suffix — uniform rule: stem = chars[..n-3], particle = chars[n-3..].
+    // Naturally yields can't→ca+n't, won't→wo+n't, didn't→did+n't.
+    if chars.len() > 3 {
+        let last3: String = chars[chars.len() - 3..].iter().collect();
+        let last3_low = last3.to_lowercase();
+        if last3_low == "n't" || last3_low == "n’t" {
+            let stem: String = chars[..chars.len() - 3].iter().collect();
+            split_contraction(&stem, out);
+            out.push(last3);
+            return;
+        }
+    }
+
+    // 3-char clitics 'll 're 've (handle both straight and curly apostrophe).
+    if chars.len() > 3 {
+        let last3: String = chars[chars.len() - 3..].iter().collect();
+        let l3 = last3.to_lowercase();
+        if matches!(l3.as_str(), "'ll" | "'re" | "'ve" | "’ll" | "’re" | "’ve") {
+            let stem: String = chars[..chars.len() - 3].iter().collect();
+            split_contraction(&stem, out);
+            out.push(last3);
+            return;
+        }
+    }
+
+    // 2-char clitics 's 'm 'd.
+    if chars.len() > 2 {
+        let last2: String = chars[chars.len() - 2..].iter().collect();
+        let l2 = last2.to_lowercase();
+        if matches!(l2.as_str(), "'s" | "'m" | "'d" | "’s" | "’m" | "’d") {
+            let stem: String = chars[..chars.len() - 2].iter().collect();
+            split_contraction(&stem, out);
+            out.push(last2);
+            return;
+        }
+    }
+
+    out.push(tok.to_string());
 }
 
 /// True iff a *lexicon-surface* token denotes a free gap slot.
@@ -217,11 +356,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tokenize_keeps_contractions_splits_punct() {
+    fn tokenize_splits_contractions_and_punct() {
+        // PTB/UD: contractions split, punctuation breaks off.
         assert_eq!(tokenize("He didn't like life?"),
-                   vec!["He", "didn't", "like", "life", "?"]);
+                   vec!["He", "did", "n't", "like", "life", "?"]);
+        // Hyphens generally split (EWT convention); productive prefix kept.
         assert_eq!(tokenize("twenty-one cats."),
-                   vec!["twenty-one", "cats", "."]);
+                   vec!["twenty", "-", "one", "cats", "."]);
+        assert_eq!(tokenize("co-workers e-mail."),
+                   vec!["co-workers", "e-mail", "."]);
+        // Dotted abbreviation kept as one token (the original p.m. bug).
+        assert_eq!(tokenize("at 10 p.m. local"),
+                   vec!["at", "10", "p.m.", "local"]);
+        // Acronyms.
+        assert_eq!(tokenize("U.S. policy"),
+                   vec!["U.S.", "policy"]);
+        // Special stems wo/ca + cannot.
+        assert_eq!(tokenize("I cannot won't can't"),
+                   vec!["I", "can", "not", "wo", "n't", "ca", "n't"]);
+        // Clitics: possessive 's, 'm, 're, 've, 'll, 'd.
+        assert_eq!(tokenize("Bush's I'm they're we've you'll I'd"),
+                   vec!["Bush", "'s", "I", "'m", "they", "'re", "we", "'ve", "you", "'ll", "I", "'d"]);
+        // Apostrophe-less pseudo-contraction NOT split.
+        assert_eq!(tokenize("its dont"),
+                   vec!["its", "dont"]);
+        // Multi-dash, ellipsis, repeated star.
+        assert_eq!(tokenize("end -- mid ... ***"),
+                   vec!["end", "--", "mid", "...", "***"]);
+        // Number with internal punct; phone.
+        assert_eq!(tokenize("256,000 and 14:57 and 303-832-8160"),
+                   vec!["256,000", "and", "14:57", "and", "303-832-8160"]);
     }
 
     #[test]
