@@ -29,7 +29,7 @@ pub struct IdiomMatch {
     pub surface: String,
     /// Whether the lexicon entry declares a free slot.
     pub has_slot: bool,
-    /// 1-based word ids of the fixed content words (supar word indices;
+    /// 1-based word ids of the fixed content words (parser word indices;
     /// these are the `tokens[].id`s the span occupies).
     pub token_ids: Vec<usize>,
     /// Surface words at the fixed-content positions only.

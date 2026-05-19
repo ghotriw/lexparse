@@ -2,7 +2,7 @@
 //!
 //! This is the SINGLE source of truth for how raw text is split into words and
 //! how each word is normalized to a match key. `tokenize` here defines the grid
-//! rows / word indices the supar encoder sees, and `lemma` defines which words
+//! rows / word indices the parser encoder sees, and `lemma` defines which words
 //! the idiom matcher pools. Any divergence from the Python reference re-introduces
 //! train/serve skew upstream of the frozen encoder — do not "improve" the rules.
 

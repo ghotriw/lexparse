@@ -29,7 +29,7 @@ mod phrasal;
 use idiom::{IdiomClassifier, IdiomMatch};
 use matcher::Lexicon;
 
-/// supar SubwordField fix_len: max subwords kept per word.
+/// parser SubwordField fix_len: max subwords kept per word.
 const FIX_LEN: usize = 20;
 /// microsoft/deberta-v3-base sentencepiece ids (RUST_INTEGRATION.md §5.1).
 const CLS_ID: i64 = 1; // ROOT row / [CLS]
@@ -51,7 +51,7 @@ struct ParseBatchRequest {
 
 #[derive(Serialize)]
 struct ParsedToken {
-    /// 1-based supar word index (== grid / output row, ROOT is 0).
+    /// 1-based parser word index (== grid / output row, ROOT is 0).
     id: usize,
     word: String,
     /// Conservative lemma (same `normalize::lemma` used for matching).
@@ -344,7 +344,7 @@ fn run_inference(
         });
     }
 
-    // Build the supar subword grid: row 0 = ROOT ([CLS]), row i+1 = word i's
+    // Build the parser subword grid: row 0 = ROOT ([CLS]), row i+1 = word i's
     // sentencepiece ids; F = min(20, longest row), right-padded with 0.
     let mut rows: Vec<Vec<i64>> = Vec::with_capacity(n + 1);
     rows.push(vec![CLS_ID]);
@@ -591,41 +591,11 @@ fn build_session() -> anyhow::Result<Session> {
             .map_err(|e| anyhow::anyhow!("{:?}", e))?;
     }
 
-    ensure_external_data_sidecar();
-
     // `.onnx` references `.onnx.data` by relative name → same dir, ORT loads
     // the external-weights sidecar automatically.
     builder
         .commit_from_file(MODEL_PATH)
         .map_err(|e| anyhow::anyhow!("{:?}", e))
-}
-
-/// Self-heals a known artifact-packaging bug: the exported `.onnx` was renamed
-/// `posb` → `upos` but its embedded external-data pointer still says
-/// `supar_deberta_v3_base_posb.fp16.onnx.data` (RUST_INTEGRATION.md §3 requires
-/// a shared basename). If only the `upos`-named sidecar is present, expose it
-/// under the `posb` name too so ORT finds the weights regardless of which way
-/// a future re-delivery names them. No-op once both exist.
-fn ensure_external_data_sidecar() {
-    let dir = std::path::Path::new(MODEL_PATH).parent().unwrap_or_else(|| std::path::Path::new("."));
-    let upos = dir.join("supar_deberta_v3_base_upos.fp16.onnx.data");
-    let posb = dir.join("supar_deberta_v3_base_posb.fp16.onnx.data");
-    for (have, want) in [(&upos, &posb), (&posb, &upos)] {
-        if have.exists() && !want.exists() {
-            #[cfg(unix)]
-            let r = std::os::unix::fs::symlink(have, want);
-            #[cfg(not(unix))]
-            let r = std::fs::hard_link(have, want);
-            match r {
-                Ok(()) => info!(
-                    "linked external-data sidecar {} -> {} (artifact basename mismatch shim)",
-                    want.display(),
-                    have.display()
-                ),
-                Err(e) => info!("could not link {} ({e}); relying on embedded ref", want.display()),
-            }
-        }
-    }
 }
 
 // --- main ---

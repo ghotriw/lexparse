@@ -1,6 +1,6 @@
 //! Maximum spanning arborescence (Chu-Liu/Edmonds) over the `s_arc` logits.
 //!
-//! supar decodes EWT with MST (non-projective). `s_arc[dep][head]` is the score
+//! parser decodes EWT with MST (non-projective). `s_arc[dep][head]` is the score
 //! that `head` is the head of `dep`; we build a directed graph where edge
 //! `u -> v` (u is head of v) has weight `s_arc[v][u]` and find the maximum
 //! arborescence rooted at node 0 (ROOT). Returns `parent[v]` for every word;
