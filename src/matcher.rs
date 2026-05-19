@@ -5,7 +5,7 @@
 //! the content-word token indices the idiom occupies. Discontinuous spans fall
 //! out naturally; the returned indices are the FIXED content words only.
 
-use crate::normalize::lemma;
+use crate::normalize::{lemma, lemma_pos};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -54,9 +54,20 @@ pub struct Lexicon {
     pub lexicon: Vec<Entry>,
 }
 
-/// Lemmatize every token (one match key per surface token).
+/// Lemmatize every token (one match key per surface token). POS-free.
 pub fn lemmatize(tokens: &[String]) -> Vec<String> {
     tokens.iter().map(|t| lemma(t)).collect()
+}
+
+/// POS-aware lemmatize: `is_verb[i]` (from model-predicted UPOS) enables the
+/// `_IRREGULAR_VERB` remap for token `i`. Mirrors `matcher.lemmatize(tokens,
+/// upos)`. `is_verb` must be aligned 1:1 with `tokens`.
+pub fn lemmatize_pos(tokens: &[String], is_verb: &[bool]) -> Vec<String> {
+    tokens
+        .iter()
+        .zip(is_verb.iter())
+        .map(|(t, &v)| lemma_pos(t, v))
+        .collect()
 }
 
 /// Prefix-tolerant lemma equality (`matcher._eq`). Absorbs the residual

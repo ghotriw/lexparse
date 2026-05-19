@@ -529,7 +529,19 @@ fn run_inference(
         }
     }
 
-    let idioms = idiom::detect(&words, &repr, &heads, &state.lexicon, &state.classifier)?;
+    // Model-predicted UPOS==VERB per word (grid row = word index + 1; row 0 is
+    // ROOT). Gates the POS-conditional `_IRREGULAR_VERB` remap in the matcher;
+    // stage3 localizes training spans with the same s_pos head → no skew.
+    let is_verb: Vec<bool> = (0..n).map(|k| upos_str(k + 1) == "VERB").collect();
+
+    let idioms = idiom::detect(
+        &words,
+        &is_verb,
+        &repr,
+        &heads,
+        &state.lexicon,
+        &state.classifier,
+    )?;
 
     info!(
         words = n,

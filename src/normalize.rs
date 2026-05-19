@@ -89,6 +89,46 @@ fn irregular(t: &str) -> Option<&'static str> {
         "teeth" => "tooth", "geese" => "goose", "mice" => "mouse", "people" => "person",
         "lives" => "life", "knives" => "knife", "wives" => "wife", "leaves" => "leaf",
         "wolves" => "wolf", "shelves" => "shelf", "halves" => "half",
+        // --- extended irregulars (added 2026-05-19): suppletive past/pp +
+        // copula that conservative stripping + prefix-tolerant `eq` cannot
+        // reach. POS-ambiguous forms (saw/lay/shot/born/smelt/spelt/spat/
+        // abode) are deliberately OMITTED — they need a UPOS=VERB gate, not a
+        // blind map, or they regress noun-anchored idioms. Must stay
+        // bit-identical to `normalize._IRREGULAR`.
+        "am" => "be", "is" => "be", "are" => "be", "was" => "be", "were" => "be",
+        "been" => "be", "being" => "be",
+        "became" => "become", "bent" => "bend", "bitten" => "bite", "dug" => "dig",
+        "ate" => "eat", "forgot" => "forget", "forgotten" => "forget",
+        "forgave" => "forgive", "hung" => "hang", "lent" => "lend", "lain" => "lie",
+        "met" => "meet", "sold" => "sell", "shone" => "shine", "stuck" => "stick",
+        "told" => "tell", "woke" => "wake", "woken" => "wake", "swung" => "swing",
+        "spun" => "spin", "struck" => "strike", "wove" => "weave", "woven" => "weave",
+        "clung" => "cling", "spilt" => "spill", "stung" => "sting", "stank" => "stink",
+        "stunk" => "stink", "strove" => "strive", "wrung" => "wring", "arose" => "arise",
+        "awoke" => "awake", "awoken" => "awake", "shrank" => "shrink",
+        "shrunk" => "shrink", "swollen" => "swell", "slung" => "sling",
+        "slain" => "slay", "slew" => "slay", "strode" => "stride",
+        "stridden" => "stride", "trod" => "tread", "trodden" => "tread",
+        "shorn" => "shear", "withdrew" => "withdraw", "overcame" => "overcome",
+        "forbade" => "forbid", "overtook" => "overtake", "underwent" => "undergo",
+        "undertook" => "undertake", "upheld" => "uphold", "withstood" => "withstand",
+        "foresaw" => "foresee", "forsook" => "forsake", "undid" => "undo",
+        "beheld" => "behold", "overslept" => "oversleep",
+        "misunderstood" => "misunderstand", "overdid" => "overdo",
+        "withheld" => "withhold", "overthrew" => "overthrow", "partook" => "partake",
+        _ => return None,
+    })
+}
+
+/// POS-gated irregulars (`normalize._IRREGULAR_VERB`): only safe when the
+/// token is a VERB, because the surface is also a common NOUN/ADJ with a
+/// different lemma. NEVER applied on the lexicon/offline side — only sentence-
+/// side with model-predicted UPOS. `lay`/`born` are intentionally absent
+/// (VERB-tagged in their confounding sense → a POS gate cannot disambiguate).
+fn irregular_verb(t: &str) -> Option<&'static str> {
+    Some(match t {
+        "saw" => "see", "shot" => "shoot", "smelt" => "smell",
+        "spelt" => "spell", "spat" => "spit", "abode" => "abide",
         _ => return None,
     })
 }
@@ -100,7 +140,14 @@ const STRIP_CHARS: &[char] = &[
 
 /// Deterministic, dependency-free lemma / match key for one surface token.
 /// Crude on purpose — applied identically to both lexicon and sentence sides.
+/// Lexicon/offline callers use this (POS-free, symmetric).
 pub fn lemma(tok: &str) -> String {
+    lemma_pos(tok, false)
+}
+
+/// POS-aware lemma: `is_verb` (sentence-side only, from model-predicted UPOS)
+/// enables the `_IRREGULAR_VERB` remap. Mirrors `normalize.lemma(tok, is_verb)`.
+pub fn lemma_pos(tok: &str, is_verb: bool) -> String {
     let lowered = tok.to_lowercase();
     let trimmed = lowered.trim_matches(|c| STRIP_CHARS.contains(&c));
     if trimmed.is_empty() {
@@ -119,6 +166,11 @@ pub fn lemma(tok: &str) -> String {
     }
 
     let t: String = chars.iter().collect();
+    if is_verb {
+        if let Some(irr) = irregular_verb(&t) {
+            return irr.to_string();
+        }
+    }
     if let Some(irr) = irregular(&t) {
         return irr.to_string();
     }
@@ -184,6 +236,41 @@ mod tests {
         assert_eq!(lemma("studies"), "study");
         assert_eq!(lemma("the"), "the");
         assert_eq!(lemma("?"), "");
+        // extended irregulars (2026-05-19) — copula + suppletive past/pp
+        assert_eq!(lemma("is"), "be");
+        assert_eq!(lemma("was"), "be");
+        assert_eq!(lemma("were"), "be");
+        assert_eq!(lemma("been"), "be");
+        assert_eq!(lemma("being"), "be");
+        assert_eq!(lemma("told"), "tell");
+        assert_eq!(lemma("became"), "become");
+        assert_eq!(lemma("woke"), "wake");
+        // POS-ambiguous forms stay literal (no blind map without a UPOS gate)
+        assert_eq!(lemma("saw"), "saw");
+        assert_eq!(lemma("lay"), "lay");
+        assert_eq!(lemma("shot"), "shot");
+    }
+
+    #[test]
+    fn pos_gated_irregular_verb() {
+        // NOUN/default reading: literal (lemma == lemma_pos(_, false))
+        assert_eq!(lemma_pos("saw", false), "saw");
+        assert_eq!(lemma_pos("shot", false), "shot");
+        assert_eq!(lemma_pos("abode", false), "abode");
+        // VERB reading: remapped to the base via _IRREGULAR_VERB
+        assert_eq!(lemma_pos("saw", true), "see");
+        assert_eq!(lemma_pos("Saw", true), "see"); // case-insensitive
+        assert_eq!(lemma_pos("shot", true), "shoot");
+        assert_eq!(lemma_pos("smelt", true), "smell");
+        assert_eq!(lemma_pos("spelt", true), "spell");
+        assert_eq!(lemma_pos("spat", true), "spit");
+        assert_eq!(lemma_pos("abode", true), "abide");
+        // lay/born intentionally NOT gated (VERB-tagged in confounding sense)
+        assert_eq!(lemma_pos("lay", true), "lay");
+        assert_eq!(lemma_pos("born", true), "born");
+        // a non-gated VERB still flows through the normal rules
+        assert_eq!(lemma_pos("walked", true), "walk");
+        assert_eq!(lemma_pos("brought", true), "bring");
     }
 
     #[test]

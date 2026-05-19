@@ -15,7 +15,7 @@
 //! preposition is stored per (verb, particle) pair so the caller can prefer
 //! the longest reading when that preposition is structurally present.
 
-use crate::normalize::lemma;
+use crate::normalize::{lemma, lemma_pos};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 
@@ -78,7 +78,9 @@ impl PhrasalLexicon {
         if pl.is_empty() {
             return None;
         }
-        let vl = lemma(verb_word);
+        // slot0 is structurally the governing verb (UPOS-guarded in main) →
+        // verb-gated lemma, symmetric with `parse_key`'s verb slot.
+        let vl = lemma_pos(verb_word, true);
         if vl.is_empty() {
             return None;
         }
@@ -122,7 +124,7 @@ fn parse_key(key: &str) -> Option<(String, String, Option<String>)> {
     if toks.len() < 2 {
         return None;
     }
-    let v = lemma(toks[0]);
+    let v = lemma_pos(toks[0], true); // slot0 = verb (symmetric with resolve)
     let p = lemma(toks[1]);
     if v.is_empty() || p.is_empty() {
         return None;

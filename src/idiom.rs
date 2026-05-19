@@ -59,11 +59,14 @@ fn sigmoid(x: f32) -> f32 {
 /// Run lexicon scan + classifier for one sentence.
 ///
 /// * `words`     — `normalize::tokenize` output (sentence word surfaces).
+/// * `is_verb`   — model-predicted UPOS == VERB per word (aligned to `words`);
+///   gates the `_IRREGULAR_VERB` remap. Must match the tags stage3 used.
 /// * `word_repr` — ONNX `word_repr` view `[1, W, D]`, `W == words.len() + 1`.
 /// * `heads`     — decoded dependency parents, indexed by word id (1-based);
 ///   `heads[0]` is the ROOT sentinel.
 pub fn detect(
     words: &[String],
+    is_verb: &[bool],
     word_repr: &ArrayView3<f32>,
     heads: &[usize],
     lexicon: &[Entry],
@@ -78,7 +81,7 @@ pub fn detect(
         );
     }
 
-    let lem = matcher::lemmatize(words);
+    let lem = matcher::lemmatize_pos(words, is_verb);
     let hits = matcher::scan(lexicon, &lem);
 
     struct Cand {
