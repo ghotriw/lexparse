@@ -3,3 +3,4 @@ model/
 dic/
 
 .DS_Store
+.env

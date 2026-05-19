@@ -577,6 +577,7 @@ fn ensure_external_data_sidecar() {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
     tracing_subscriber::fmt::init();
 
     info!("loading vocab from {VOCAB_PATH}");
