@@ -54,6 +54,8 @@ struct ParsedToken {
     /// 1-based supar word index (== grid / output row, ROOT is 0).
     id: usize,
     word: String,
+    /// Conservative lemma (same `normalize::lemma` used for matching).
+    lemma: String,
     /// Head word id; 0 == ROOT.
     head: usize,
     rel: String,
@@ -480,6 +482,7 @@ fn run_inference(
         tokens.push(ParsedToken {
             id: i,
             word: words[i - 1].clone(),
+            lemma: normalize::lemma(&words[i - 1]),
             head,
             rel,
             upos,

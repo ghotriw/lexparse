@@ -53,7 +53,7 @@ curl -X POST http://localhost:3000/parse \
 
 ```ts
 {
-  tokens: { id: number; word: string; upos: string; head: number; rel: string }[];
+  tokens: { id: number; word: string; lemma: string; upos: string; head: number; rel: string }[];
   phrasal_verbs: { verb: string; particle: string; verb_id: number; particle_id: number;
                    prep?: string; prep_id?: number }[];
   idioms: { surface: string; span_text: string; token_ids: number[];
