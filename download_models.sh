@@ -2,21 +2,23 @@
 set -e
 
 echo "Select model:"
-echo "  1) deberta-v3-small  (faster, less RAM)"
-echo "  2) deberta-v3-base   (more accurate)"
+echo "  1) deberta-v3-xsmall  (fastest, lowest RAM)"
+echo "  2) deberta-v3-small  (faster, less RAM)"
+echo "  3) deberta-v3-base   (more accurate)"
 printf "Choice [1]: "
 read choice
 
 case "${choice}" in
-    2) REPO="ghotriw/deberta-v3-base-biaffine-dep-pos-en" ;;
-    *) REPO="ghotriw/deberta-v3-small-biaffine-dep-pos-en" ;;
+    3) REPO="ghotriw/deberta-v3-base-biaffine-dep-pos-en-ewt" ;;
+    2) REPO="ghotriw/deberta-v3-small-biaffine-dep-pos-en-ewt" ;;
+    *) REPO="ghotriw/deberta-v3-xsmall-biaffine-dep-pos-en-ewt" ;;
 esac
 
 BASE="https://huggingface.co/${REPO}/resolve/main"
 
 mkdir -p model dic
 
-FILES="model/model.fp16.onnx model/vocabs.json model/idiom_classifier.json model/tokenizer.json dic/lexicon.json dic/phrasal-verbs.json"
+FILES="model/model.fp16.onnx model/vocabs.json model/tokenizer.json"
 
 existing=0
 total=0
@@ -49,9 +51,6 @@ download() {
 
 download "${BASE}/model.fp16.onnx"       model/model.fp16.onnx
 download "${BASE}/vocabs.json"           model/vocabs.json
-download "${BASE}/idiom_classifier.json" model/idiom_classifier.json
 download "${BASE}/tokenizer.json"        model/tokenizer.json
-download "${BASE}/lexicon.json"          dic/lexicon.json
-download "${BASE}/phrasal-verbs.json"    dic/phrasal-verbs.json
 
 echo "done"

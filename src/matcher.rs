@@ -47,22 +47,15 @@ pub struct Entry {
     pub surface: String,
     #[serde(default)]
     pub has_slot: bool,
+    /// MWE category from the enriched lexicon: idiom, phrasal_verb,
+    /// collocation_phrase, proverb_saying, etc.
+    #[serde(default)]
+    pub category: String,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct Lexicon {
-    pub lexicon: Vec<Entry>,
-}
 
-/// Lemmatize every token (one match key per surface token). POS-free.
-/// Test-only: the runtime serve path is POS-gated (`lemmatize_pos`) and Rust
-/// never builds the lexicon (that is Python's `build_lexicon.py`), so this has
-/// no production caller — it survives as the POS-free reference for the
-/// matcher's golden/regression tests, mirroring Python `matcher.lemmatize`.
-#[cfg(test)]
-pub fn lemmatize(tokens: &[String]) -> Vec<String> {
-    tokens.iter().map(|t| crate::normalize::lemma(t)).collect()
-}
+
+
 
 /// POS-aware lemmatize: `is_verb[i]` (from model-predicted UPOS) enables the
 /// `_IRREGULAR_VERB` remap for token `i`. Mirrors `matcher.lemmatize(tokens,
@@ -78,18 +71,7 @@ pub fn lemmatize_pos(tokens: &[String], is_verb: &[bool]) -> Vec<String> {
 /// Prefix-tolerant lemma equality (`matcher._eq`). Absorbs the residual
 /// inflection the deliberately-conservative `lemma` leaves, symmetrically.
 fn eq(a: &str, b: &str) -> bool {
-    if a == b {
-        return true;
-    }
-    if a.is_empty() || b.is_empty() {
-        return false;
-    }
-    let (short, long) = if a.chars().count() <= b.chars().count() {
-        (a, b)
-    } else {
-        (b, a)
-    };
-    short.chars().count() >= 3 && long.starts_with(short)
+    a == b
 }
 
 /// `elements` -> (fixed_lemmas, gaps) where `gaps[i]` is the max tokens allowed
@@ -190,101 +172,4 @@ pub fn scan(lex: &[Entry], lem: &[String]) -> Vec<(usize, Vec<usize>)> {
     // stable sort by descending span length (preserves lexicon order on ties)
     out.sort_by_key(|(_, idxs)| std::cmp::Reverse(idxs.len()));
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::normalize::tokenize;
-
-    fn load_lexicon() -> Vec<Entry> {
-        let raw = std::fs::read_to_string("dic/lexicon.json")
-            .expect("dic/lexicon.json not found (run tests from the project root)");
-        serde_json::from_str::<Lexicon>(&raw).unwrap().lexicon
-    }
-
-    fn by_key<'a>(lex: &'a [Entry], key: &[&str]) -> &'a Entry {
-        lex.iter()
-            .find(|e| e.fixed_key.iter().map(String::as_str).eq(key.iter().copied()))
-            .unwrap_or_else(|| panic!("no lexicon entry for {key:?}"))
-    }
-
-    // Golden oracle mirroring py_example/matcher.py __main__ (uses the REAL
-    // lexicon entries, slots included — anti-skew §7).
-    #[test]
-    fn smoke_cases_from_python() {
-        let lex = load_lexicon();
-
-        for (sent, key, expect) in [
-            (
-                "He finally spilled the beans about the party.",
-                &["spill", "the", "bean"][..],
-                vec!["spilled", "the", "beans"],
-            ),
-            (
-                "She decided to make up her mind quickly.",
-                &["make", "up", "mind"][..],
-                vec!["make", "up", "mind"],
-            ),
-            (
-                "They brought the empire to its knees last year.",
-                &["bring", "to", "knee"][..],
-                vec!["brought", "to", "knees"],
-            ),
-            (
-                "We went off the beaten track on holiday.",
-                &["off", "the", "beaten", "track"][..],
-                vec!["off", "the", "beaten", "track"],
-            ),
-        ] {
-            let toks = tokenize(sent);
-            let lem = lemmatize(&toks);
-            let e = by_key(&lex, key);
-            let idx =
-                match_entry(&lem, &e.elements).unwrap_or_else(|| panic!("no match: {sent}"));
-            let span: Vec<&str> = idx.iter().map(|&i| toks[i].as_str()).collect();
-            assert_eq!(span, expect, "sentence: {sent}");
-        }
-
-        // Plain sentence: scan must return zero hits.
-        let toks = tokenize("Nothing idiomatic in this plain sentence.");
-        let lem = lemmatize(&toks);
-        assert!(scan(&lex, &lem).is_empty());
-    }
-
-    // Regression cases: full sentence with surrounding context. Verifies the
-    // scanner finds the idiom even when it is not the only clause in the sentence.
-    #[test]
-    fn scan_regression_cases() {
-        let lex = load_lexicon();
-
-        for (sent, expected_surface) in [
-            ("You have an audition today? Break a leg!", "break a leg"),
-            ("He spilled the beans about the surprise party.", "spill the beans"),
-            ("She was over the moon when she heard the news.", "over the moon"),
-            ("Don't let the cat out of the bag before the announcement.", "let the cat out of the bag"),
-            ("That new iPhone costs an arm and a leg.", "an arm and a leg"),
-        ] {
-            let toks = tokenize(sent);
-            let lem = lemmatize(&toks);
-            let hits = scan(&lex, &lem);
-            let surfaces: Vec<&str> = hits.iter().map(|(i, _)| lex[*i].surface.as_str()).collect();
-            assert!(
-                surfaces.contains(&expected_surface),
-                "expected surface {:?} in {:?}\n  sentence: {}",
-                expected_surface, surfaces, sent,
-            );
-        }
-    }
-
-    #[test]
-    fn scan_prefers_longer_spans_first() {
-        let lex = load_lexicon();
-        let toks = tokenize("He finally spilled the beans about the party.");
-        let lem = lemmatize(&toks);
-        let hits = scan(&lex, &lem);
-        assert!(!hits.is_empty());
-        // sorted by descending matched-span length
-        assert!(hits.windows(2).all(|w| w[0].1.len() >= w[1].1.len()));
-    }
 }

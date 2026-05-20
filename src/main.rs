@@ -21,13 +21,12 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::info;
 
 mod decode;
-mod idiom;
+mod mwe;
 mod matcher;
 mod normalize;
 mod phrasal;
 
-use idiom::{IdiomClassifier, IdiomMatch};
-use matcher::Lexicon;
+use mwe::MweMatch;
 
 /// parser SubwordField fix_len: max subwords kept per word.
 const FIX_LEN: usize = 20;
@@ -37,7 +36,6 @@ const UNK_ID: i64 = 3; // word that produced no pieces
 
 const MODEL_PATH: &str = "model/model.fp16.onnx";
 const VOCAB_PATH: &str = "model/vocabs.json";
-const CLASSIFIER_PATH: &str = "model/idiom_classifier.json";
 
 const LEXICON_PATH: &str = "dic/lexicon.json";
 const PHRASAL_PATH: &str = "dic/phrasal-verbs.json";
@@ -81,7 +79,7 @@ struct PhrasalVerb {
 struct SentenceResult {
     tokens: Vec<ParsedToken>,
     phrasal_verbs: Vec<PhrasalVerb>,
-    idioms: Vec<IdiomMatch>,
+    mwes: Vec<MweMatch>,
 }
 
 #[derive(Serialize)]
@@ -192,8 +190,7 @@ struct AppState {
     tokenizer: Tokenizer,
     rels: Vec<String>,
     upos: Vec<String>,
-    lexicon: Vec<matcher::Entry>,
-    classifier: IdiomClassifier,
+    lexicon: mwe::MweLexicon,
     phrasal: phrasal::PhrasalLexicon,
     job_tx: mpsc::UnboundedSender<SentenceJob>,
 }
@@ -340,7 +337,7 @@ fn run_inference(
         return Ok(SentenceResult {
             tokens: vec![],
             phrasal_verbs: vec![],
-            idioms: vec![],
+            mwes: vec![],
         });
     }
 
@@ -385,10 +382,6 @@ fn run_inference(
     let (pos_shape, pos_data) = outputs["s_pos"]
         .try_extract_tensor::<f32>()
         .map_err(|e| anyhow::anyhow!("{:?}", e))?;
-    let (repr_shape, repr_data) = outputs["word_repr"]
-        .try_extract_tensor::<f32>()
-        .map_err(|e| anyhow::anyhow!("{:?}", e))?;
-
     let dims = |s: &[i64]| s.iter().map(|&d| d as usize).collect::<Vec<_>>();
     let ad = dims(arc_shape);
     let arc = ArrayView3::from_shape((ad[0], ad[1], ad[2]), arc_data)?;
@@ -396,8 +389,6 @@ fn run_inference(
     let rel = ArrayView4::from_shape((rd[0], rd[1], rd[2], rd[3]), rel_data)?;
     let pd = dims(pos_shape);
     let pos = ArrayView3::from_shape((pd[0], pd[1], pd[2]), pos_data)?;
-    let rpd = dims(repr_shape);
-    let repr = ArrayView3::from_shape((rpd[0], rpd[1], rpd[2]), repr_data)?;
 
     // MST (Chu-Liu/Edmonds): edge u->v (u is head of v) has weight s_arc[v][u].
     let mut score = vec![vec![f32::NEG_INFINITY; w_dim]; w_dim];
@@ -534,25 +525,23 @@ fn run_inference(
     // stage3 localizes training spans with the same s_pos head → no skew.
     let is_verb: Vec<bool> = (0..n).map(|k| upos_str(k + 1) == "VERB").collect();
 
-    let idioms = idiom::detect(
+    let mwes = mwe::detect(
         &words,
         &is_verb,
-        &repr,
         &heads,
         &state.lexicon,
-        &state.classifier,
-    )?;
+    );
 
     info!(
         words = n,
         phrasal = phrasal_verbs.len(),
-        idioms = idioms.len(),
+        mwes = mwes.len(),
         "parsed"
     );
     Ok(SentenceResult {
         tokens,
         phrasal_verbs,
-        idioms,
+        mwes,
     })
 }
 
@@ -621,11 +610,7 @@ async fn main() -> anyhow::Result<()> {
     let vocab: Vocab = serde_json::from_str::<VocabRaw>(&std::fs::read_to_string(VOCAB_PATH)?)?.into();
 
     info!("loading lexicon from {LEXICON_PATH}");
-    let lexicon: Lexicon = serde_json::from_str(&std::fs::read_to_string(LEXICON_PATH)?)?;
-
-    info!("loading idiom classifier from {CLASSIFIER_PATH}");
-    let classifier: IdiomClassifier =
-        serde_json::from_str(&std::fs::read_to_string(CLASSIFIER_PATH)?)?;
+    let lexicon = mwe::MweLexicon::load(LEXICON_PATH)?;
 
     info!("loading phrasal-verb lexicon from {PHRASAL_PATH}");
     let phrasal = phrasal::PhrasalLexicon::load(PHRASAL_PATH)?;
@@ -641,8 +626,7 @@ async fn main() -> anyhow::Result<()> {
         tokenizer,
         rels: vocab.rels,
         upos: vocab.upos,
-        lexicon: lexicon.lexicon,
-        classifier,
+        lexicon,
         phrasal,
         job_tx,
     });
@@ -651,7 +635,7 @@ async fn main() -> anyhow::Result<()> {
     spawn_inference_worker(Arc::clone(&state), job_rx);
     info!(
         idle_unload_secs = idle_unload_secs(),
-        lexicon = state.lexicon.len(),
+        lexicon = state.lexicon.entries().len(),
         phrasal = state.phrasal.len(),
         "model is lazy-loaded on first request, evicted after idle"
     );
@@ -686,9 +670,7 @@ mod e2e {
     fn build_state() -> anyhow::Result<AppState> {
         let vocab: Vocab =
             serde_json::from_str::<VocabRaw>(&std::fs::read_to_string(VOCAB_PATH)?)?.into();
-        let lexicon: Lexicon = serde_json::from_str(&std::fs::read_to_string(LEXICON_PATH)?)?;
-        let classifier: IdiomClassifier =
-            serde_json::from_str(&std::fs::read_to_string(CLASSIFIER_PATH)?)?;
+        let lexicon = mwe::MweLexicon::load(LEXICON_PATH)?;
         let phrasal = phrasal::PhrasalLexicon::load(PHRASAL_PATH)?;
         let tokenizer = Tokenizer::from_file("model/tokenizer.json")
             .map_err(|e| anyhow::anyhow!("tokenizer: {}", e))?;
@@ -698,55 +680,64 @@ mod e2e {
             tokenizer,
             rels: vocab.rels,
             upos: vocab.upos,
-            lexicon: lexicon.lexicon,
-            classifier,
+            lexicon,
             phrasal,
             job_tx,
         })
     }
 
-    // Idiom detection golden cases.
-    // Each tuple: (sentence, exact lexicon surface as returned by the model, expect_idiomatic).
+    // MWE detection golden cases.
+    // Each tuple: (sentence, exact lexicon surface as returned by the model, expect_mwe).
     // surface is the winning entry after overlap resolution — run with --nocapture to see
     // what the model actually returns if a case starts failing.
-    const IDIOM_CASES: &[(&str, &str, bool)] = &[
-        ("You have an audition today? Break a leg!", "break a leg", true),
-        ("He spilled the beans about the surprise party.", "spill [pron] beans", true),
-        ("After years of hard work, she finally kicked the bucket.", "kick [pron] bucket", true),
-        // Literal use — the model should NOT flag this as idiomatic.
-        ("She broke her leg falling off the horse.", "break a leg", false),
+    const MWE_CASES: &[(&str, &str)] = &[
+        ("You have an audition today? Break a leg!", "Break a leg!"),
+        ("He spilled the beans about the surprise party.", "spill the beans"),
+        ("After years of hard work, she finally kicked the bucket.", "kick the bucket"),
     ];
 
     #[test]
     #[ignore = "requires model artifacts; run with: cargo test -- --include-ignored"]
-    fn idiom_detection_golden_cases() {
+    fn mwe_detection_golden_cases() {
         let state = build_state().expect("failed to load model artifacts");
         state
             .session
             .with_session(|session| {
-                for &(sent, surface, expect_idiomatic) in IDIOM_CASES {
+                for &(sent, surface) in MWE_CASES {
                     let result = run_inference(session, &state, sent)
                         .unwrap_or_else(|e| panic!("inference failed for {:?}: {}", sent, e));
 
-                    let hit = result.idioms.iter().find(|m| m.surface == surface);
+                    let hit = result.mwes.iter().find(|m| m.surface == surface);
 
-                    match (hit, expect_idiomatic) {
-                        (None, true) => panic!(
-                            "expected idiom {:?} in {:?} but it was not detected",
+                    if hit.is_none() {
+                        panic!(
+                            "expected MWE {:?} in {:?} but it was not detected",
                             surface, sent
-                        ),
-                        (Some(m), true) => assert!(
-                            m.idiomatic,
-                            "expected idiomatic=true for {:?} in {:?} (prob={:.3})",
-                            m.surface, sent, m.prob
-                        ),
-                        (Some(m), false) => assert!(
-                            !m.idiomatic,
-                            "expected idiomatic=false for {:?} in {:?} (prob={:.3})",
-                            m.surface, sent, m.prob
-                        ),
-                        (None, false) => {} // not detected and not expected — ok
+                        );
                     }
+                }
+                Ok(())
+            })
+            .expect("session error");
+    }
+
+    #[test]
+    #[ignore = "requires model artifacts; run with: cargo test -- --include-ignored"]
+    fn test_user_sentence_mwes() {
+        let state = build_state().expect("failed to load model artifacts");
+        state
+            .session
+            .with_session(|session| {
+                let sent = "It could have wrapped its body twice around Uncle Vernon’s car and crushed it into a dustbin – but at the moment it didn’t look in the mood.";
+                let result = run_inference(session, &state, sent).unwrap();
+                println!("Detected MWEs for user sentence:");
+                for m in &result.mwes {
+                    println!("  surface: {:?}, words: {:?}", m.surface, m.words);
+                }
+                for m in &result.mwes {
+                    assert_ne!(m.surface, "itsy-bitsy", "should not match 'its' to 'itsy-bitsy'");
+                    assert_ne!(m.surface, "wrap someone or something (up†) (in something)", "should not match single-word 'wrapped'");
+                    assert_ne!(m.surface, "wrap someone or something (up†) (with something)", "should not match single-word 'wrapped'");
                 }
                 Ok(())
             })

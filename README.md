@@ -1,13 +1,14 @@
 # lexparse
 
-Lightweight English NLP microservice: dependency parsing, POS tagging, phrasal verb and idiom detection.
+Lightweight English NLP microservice: dependency parsing, POS tagging, phrasal verb and MWE (Multi-Word Expression) detection.
 
 Built with Rust + ONNX Runtime.
 
 | Model | Size | HuggingFace |
 |-------|------|-------------|
-| deberta-v3-**small** | faster, less RAM | [ghotriw/deberta-v3-small-biaffine-dep-pos-en](https://huggingface.co/ghotriw/deberta-v3-small-biaffine-dep-pos-en) |
-| deberta-v3-**base** | more accurate | [ghotriw/deberta-v3-base-biaffine-dep-pos-en](https://huggingface.co/ghotriw/deberta-v3-base-biaffine-dep-pos-en) |
+| deberta-v3-**xsmall** | fastest, lowest RAM | [ghotriw/deberta-v3-xsmall-biaffine-dep-pos-en-ewt](https://huggingface.co/ghotriw/deberta-v3-xsmall-biaffine-dep-pos-en-ewt) |
+| deberta-v3-**small** | faster, less RAM | [ghotriw/deberta-v3-small-biaffine-dep-pos-en-ewt](https://huggingface.co/ghotriw/deberta-v3-small-biaffine-dep-pos-en-ewt) |
+| deberta-v3-**base** | more accurate | [ghotriw/deberta-v3-base-biaffine-dep-pos-en-ewt](https://huggingface.co/ghotriw/deberta-v3-base-biaffine-dep-pos-en-ewt) |
 
 ## Setup
 
@@ -56,8 +57,10 @@ curl -X POST http://localhost:3000/parse \
   tokens: { id: number; word: string; lemma: string; upos: string; head: number; rel: string }[];
   phrasal_verbs: { verb: string; particle: string; verb_id: number; particle_id: number;
                    prep?: string; prep_id?: number }[];
-  idioms: { surface: string; span_text: string; token_ids: number[];
-            prob: number; idiomatic: boolean }[];
+  mwes: { surface: string; category: "idiom" | "phrasal_verb" | "collocation_phrase" | "proverb_saying";
+          has_slot: boolean; token_ids: number[]; words: string[]; span_text: string;
+          prob: number; discontinuous: boolean;
+          tree_connected: boolean }[];
 }
 ```
 
@@ -71,7 +74,7 @@ Returns `ok`.
 # Unit and lexicon-level tests (no model required)
 cargo test
 
-# Full regression tests including idiom and phrasal verb detection (requires model artifacts)
+# Full regression tests including MWE and phrasal verb detection (requires model artifacts)
 cargo test -- --include-ignored
 ```
 

@@ -1,6 +1,5 @@
 target/
 model/
-dic/
 test/
 
 .DS_Store
