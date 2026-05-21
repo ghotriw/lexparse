@@ -75,14 +75,12 @@ fn extract_tree(node: &ParsedToken, tokens: &[ParsedToken]) -> LexiconTreeNode {
         deps: vec![],
     };
 
-    if !is_slot {
-        let deps: Vec<LexiconTreeNode> = tokens
-            .iter()
-            .filter(|c| c.head == node.id)
-            .map(|c| extract_tree(c, tokens))
-            .collect();
-        tree.deps = deps;
-    }
+    let deps: Vec<LexiconTreeNode> = tokens
+        .iter()
+        .filter(|c| c.head == node.id)
+        .map(|c| extract_tree(c, tokens))
+        .collect();
+    tree.deps = deps;
 
     tree
 }

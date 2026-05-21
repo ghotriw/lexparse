@@ -20,7 +20,7 @@ BASE="https://huggingface.co/${REPO}/resolve/main"
 
 mkdir -p model dic
 
-FILES="model/model.fp16.onnx model/vocabs.json model/tokenizer.json"
+FILES="model/model.onnx model/vocabs.json model/tokenizer.json"
 
 existing=0
 total=0
@@ -51,7 +51,7 @@ download() {
     curl -fL --progress-bar "$url" -o "$dest"
 }
 
-download "${BASE}/model.fp16.onnx"       model/model.fp16.onnx
+download "${BASE}/model.onnx"            model/model.onnx
 download "${BASE}/vocabs.json"           model/vocabs.json
 download "${BASE}/tokenizer.json"        model/tokenizer.json
 

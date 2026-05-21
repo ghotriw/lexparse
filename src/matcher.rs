@@ -54,7 +54,9 @@ pub fn match_tree(
         }
     }
 
-    matched_nodes.push(target_node);
+    if !lex_node.is_slot {
+        matched_nodes.push(target_node);
+    }
 
     // 3. Match all dependencies recursively
     for lex_child in &lex_node.deps {

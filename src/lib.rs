@@ -16,12 +16,13 @@ pub mod normalize;
 use mwe::MweMatch;
 
 /// parser SubwordField fix_len: max subwords kept per word.
-const FIX_LEN: usize = 20;
+/// This is an upper bound; actual tensor size shrinks to sentence max.
+const MAX_FIX_LEN: usize = 20;
 /// microsoft/deberta-v3-base sentencepiece ids (RUST_INTEGRATION.md §5.1).
 const CLS_ID: i64 = 1; // ROOT row / [CLS]
 const UNK_ID: i64 = 3; // word that produced no pieces
 
-pub const MODEL_PATH: &str = "model/model.fp16.onnx";
+pub const MODEL_PATH: &str = "model/model.onnx";
 pub const VOCAB_PATH: &str = "model/vocabs.json";
 
 pub const LEXICON_PATH: &str = "dic/lexicon.jsonl";
@@ -189,6 +190,7 @@ pub fn run_inference(
     state: &AppState,
     sentence: &str,
 ) -> anyhow::Result<SentenceResult> {
+    let start_time = Instant::now();
     // §5.1: word boundaries come from the canonical tokenizer, NOT whitespace.
     let words = normalize::tokenize(sentence);
     let n = words.len();
@@ -214,8 +216,8 @@ pub fn run_inference(
         }
         rows.push(ids);
     }
-    // F dim is static in the ONNX graph (exported with fix_len=20, no dynamic axis).
-    let fix_len = FIX_LEN;
+    // Compute dynamic fix_len: the longest subword list in this sentence, capped at MAX_FIX_LEN
+    let fix_len = rows.iter().map(|row| row.len()).max().unwrap_or(1).min(MAX_FIX_LEN);
     let w_dim = n + 1;
 
     let mut subwords = Array3::<i64>::zeros((1, w_dim, fix_len));
@@ -305,6 +307,7 @@ pub fn run_inference(
     info!(
         words = n,
         mwes = mwes.len(),
+        elapsed_ms = start_time.elapsed().as_millis(),
         "parsed"
     );
 
@@ -380,7 +383,7 @@ pub fn build_session() -> anyhow::Result<Session> {
 // --- end-to-end regression tests ---
 //
 // These tests require all model artifacts to be present:
-//   model/model.fp16.onnx   model/vocabs.json   model/idiom_classifier.json
+//   model/model.onnx   model/vocabs.json   model/idiom_classifier.json
 //   dic/lexicon.jsonl
 //
 // Run with:
