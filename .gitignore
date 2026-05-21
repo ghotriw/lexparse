@@ -1,6 +1,7 @@
 target/
 model/
 test/
+tmp/
 
 .DS_Store
 .env

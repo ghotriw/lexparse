@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct LexiconTreeNode {
     pub lemma: String,
     pub rel: String,
@@ -22,8 +22,8 @@ pub struct LexiconTreeNode {
 pub struct LexiconEntry {
     pub id: u32,
     pub phrase: String,
-    #[serde(rename = "type")]
-    pub category: String,
+    #[serde(default)]
+    pub categories: Vec<String>,
     pub pos: Option<String>,
     pub definition: Option<String>,
     #[serde(default)]
@@ -50,7 +50,15 @@ impl MweLexicon {
             if line.trim().is_empty() {
                 continue;
             }
-            if let Ok(entry) = serde_json::from_str::<LexiconEntry>(&line) {
+            if let Ok(mut entry) = serde_json::from_str::<LexiconEntry>(&line) {
+                // Filter out 1-node trees (like "SLOT" or "101") because they act like wildcards
+                // and match single words, flooding the output with false positives.
+                entry.trees.retain(|t| !t.deps.is_empty());
+                
+                if entry.trees.is_empty() {
+                    continue; // Skip entries that have no valid multi-word trees
+                }
+                
                 let entry_idx = entries.len();
                 for (tree_idx, tree) in entry.trees.iter().enumerate() {
                     let key = if tree.is_slot {
@@ -71,7 +79,7 @@ impl MweLexicon {
 #[derive(Debug, Serialize)]
 pub struct MweMatch {
     pub surface: String,
-    pub category: String,
+    pub categories: Vec<String>,
     pub has_slot: bool,
     pub token_ids: Vec<usize>,
     pub words: Vec<String>,
@@ -140,7 +148,7 @@ pub fn detect(
                 
                 cands.push(MweMatch {
                     surface: entry.phrase.clone(),
-                    category: entry.category.clone(),
+                    categories: entry.categories.clone(),
                     has_slot,
                     token_ids: matched_nodes.iter().map(|&j| j + 1).collect(),
                     words: matched_nodes.iter().map(|&j| words[j].clone()).collect(),

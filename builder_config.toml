@@ -1,0 +1,8 @@
+# Path to the Wiktionary dump file (JSONL)
+input_file = "./tmp/raw-wiktextract-data-english.jsonl"
+
+# Mapping of Wiktionary categories to internal parser category names
+[target_categories]
+# "English idioms" = "idiom"
+"English phrasal verbs" = "phrasal_verb"
+# "English proverbs" = "proverb"
