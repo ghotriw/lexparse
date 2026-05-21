@@ -13,7 +13,6 @@ use ndarray::{Array3, ArrayView3, ArrayView4};
 use ort::ep::CPU;
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 use tokenizers::Tokenizer;
@@ -24,7 +23,6 @@ mod decode;
 mod mwe;
 mod matcher;
 mod normalize;
-mod phrasal;
 
 use mwe::MweMatch;
 
@@ -37,8 +35,7 @@ const UNK_ID: i64 = 3; // word that produced no pieces
 const MODEL_PATH: &str = "model/model.fp16.onnx";
 const VOCAB_PATH: &str = "model/vocabs.json";
 
-const LEXICON_PATH: &str = "dic/lexicon.json";
-const PHRASAL_PATH: &str = "dic/phrasal-verbs.json";
+const LEXICON_PATH: &str = "dic/lexicon.jsonl";
 
 // --- types ---
 
@@ -61,24 +58,8 @@ struct ParsedToken {
 }
 
 #[derive(Serialize)]
-struct PhrasalVerb {
-    verb: String,
-    particle: String,
-    verb_id: usize,
-    particle_id: usize,
-    /// Extending preposition for 3-component verbs ("come up **with**");
-    /// absent for bare verb+particle. Optional so the JSON stays
-    /// backward-compatible with consumers that only read verb/particle.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    prep: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    prep_id: Option<usize>,
-}
-
-#[derive(Serialize)]
 struct SentenceResult {
     tokens: Vec<ParsedToken>,
-    phrasal_verbs: Vec<PhrasalVerb>,
     mwes: Vec<MweMatch>,
 }
 
@@ -191,7 +172,6 @@ struct AppState {
     rels: Vec<String>,
     upos: Vec<String>,
     lexicon: mwe::MweLexicon,
-    phrasal: phrasal::PhrasalLexicon,
     job_tx: mpsc::UnboundedSender<SentenceJob>,
 }
 
@@ -336,7 +316,6 @@ fn run_inference(
     if n == 0 {
         return Ok(SentenceResult {
             tokens: vec![],
-            phrasal_verbs: vec![],
             mwes: vec![],
         });
     }
@@ -404,71 +383,20 @@ fn run_inference(
     let n_rels = rd[3];
     let n_upos = pd[2];
 
-    // UPOS for every grid row (ROOT + words). Precomputed because the phrasal
-    // second pass needs the *head* token's POS, not just the current token's.
+    // UPOS for every grid row (ROOT + words). Precomputed because the MWE
+    // matcher needs the *head* token's POS, not just the current token's.
     let upos_ids: Vec<usize> = (0..w_dim)
         .map(|w| argmax((0..n_upos).map(|k| pos[[0, w, k]])))
         .collect();
     let upos_str =
         |w: usize| state.upos.get(upos_ids[w]).cloned().unwrap_or_else(|| "X".into());
 
-    // Prefer the longest reading: given a confirmed verb (id `h`) + particle
-    // (id `after`) and the prepositions that extend that pair ("come up" ->
-    // {with}), find the extending preposition in the tree to upgrade
-    // "come up" → "come up with". The preposition must be an ADP, occur after
-    // the particle, and hang off the verb — directly, or (the usual UD shape)
-    // as the `case` of one of the verb's arguments: with → noise → put.
-    let find_prep = |h: usize, after: usize, preps: &[String]| -> (Option<String>, Option<usize>) {
-        if preps.is_empty() {
-            return (None, None);
-        }
-        for j in (after + 1)..=n {
-            if upos_str(j).as_str() != "ADP" {
-                continue;
-            }
-            let jl = normalize::lemma(&words[j - 1]);
-            if !preps.iter().any(|pp| pp.as_str() == jl) {
-                continue;
-            }
-            let hj = heads[j];
-            if hj == h || (hj >= 1 && heads[hj] == h) {
-                return (Some(words[j - 1].clone()), Some(j));
-            }
-        }
-        (None, None)
-    };
-
     let mut tokens = Vec::with_capacity(n);
-    let mut phrasal_verbs = Vec::new();
-    // Particle word-ids already claimed, so the second pass never double-emits.
-    let mut phrasal_particle_ids: HashSet<usize> = HashSet::new();
     for i in 1..=n {
         let head = heads[i];
         let rel_id = argmax((0..n_rels).map(|k| rel[[0, i, head, k]]));
         let rel = state.rels.get(rel_id).cloned().unwrap_or_else(|| "dep".into());
         let upos = upos_str(i);
-
-        // compound:prt edge ⇒ phrasal verb (head verb + particle), pure
-        // syntax. UNTOUCHED in recall: the confident, label-driven path
-        // (§6.3) still emits even when the pair is not in the lexicon
-        // (`unwrap_or_default` → no prep, bare core). When it *is* known,
-        // the preposition upgrades it to the 3-component reading.
-        if rel == "compound:prt" && head >= 1 {
-            let preps = state
-                .phrasal
-                .resolve(&words[head - 1], &words[i - 1])
-                .unwrap_or_default();
-            let (prep, prep_id) = find_prep(head, i, &preps);
-            phrasal_verbs.push(PhrasalVerb {
-                verb: words[head - 1].clone(),
-                particle: words[i - 1].clone(),
-                verb_id: head,
-                particle_id: i,
-                prep,
-                prep_id,
-            });
-            phrasal_particle_ids.insert(i);
-        }
 
         tokens.push(ParsedToken {
             id: i,
@@ -480,67 +408,28 @@ fn run_inference(
         });
     }
 
-    // Approach-3 second pass — label-agnostic. The particle→verb ARC is the
-    // stable signal (the deprel flips between compound:prt/advmod with the
-    // verb's surface form, and UD-EWT itself annotates "come up" as advmod),
-    // so confirm any verb-headed particle/adposition edge against the closed
-    // phrasal-verb inventory instead of trusting the label. Lemma match makes
-    // it tense-invariant (came→come); the closed list + the arc keep
-    // adverbial false positives ("look up at the sky") out.
-    for i in 1..=n {
-        if phrasal_particle_ids.contains(&i) {
-            continue; // already emitted by the compound:prt path
-        }
-        let head = heads[i];
-        if head < 1 {
-            continue;
-        }
-        if !matches!(upos_str(i).as_str(), "ADP" | "ADV" | "PART") {
-            continue;
-        }
-        if !matches!(upos_str(head).as_str(), "VERB" | "AUX") {
-            continue;
-        }
-        // Infinitive "to" (PART) precedes its verb head — not a particle.
-        // Real phrasal verb particles always follow the verb in word order.
-        if i < head {
-            continue;
-        }
-        if let Some(preps) = state.phrasal.resolve(&words[head - 1], &words[i - 1]) {
-            let (prep, prep_id) = find_prep(head, i, &preps);
-            phrasal_verbs.push(PhrasalVerb {
-                verb: words[head - 1].clone(),
-                particle: words[i - 1].clone(),
-                verb_id: head,
-                particle_id: i,
-                prep,
-                prep_id,
-            });
-            phrasal_particle_ids.insert(i);
-        }
-    }
-
     // Model-predicted UPOS==VERB per word (grid row = word index + 1; row 0 is
     // ROOT). Gates the POS-conditional `_IRREGULAR_VERB` remap in the matcher;
     // stage3 localizes training spans with the same s_pos head → no skew.
     let is_verb: Vec<bool> = (0..n).map(|k| upos_str(k + 1) == "VERB").collect();
 
+    let rels: Vec<String> = tokens.iter().map(|t| t.rel.clone()).collect();
+
     let mwes = mwe::detect(
         &words,
         &is_verb,
         &heads,
+        &rels,
         &state.lexicon,
     );
 
     info!(
         words = n,
-        phrasal = phrasal_verbs.len(),
         mwes = mwes.len(),
         "parsed"
     );
     Ok(SentenceResult {
         tokens,
-        phrasal_verbs,
         mwes,
     })
 }
@@ -612,8 +501,7 @@ async fn main() -> anyhow::Result<()> {
     info!("loading lexicon from {LEXICON_PATH}");
     let lexicon = mwe::MweLexicon::load(LEXICON_PATH)?;
 
-    info!("loading phrasal-verb lexicon from {PHRASAL_PATH}");
-    let phrasal = phrasal::PhrasalLexicon::load(PHRASAL_PATH)?;
+
 
     info!("loading tokenizer");
     let tokenizer = Tokenizer::from_file("model/tokenizer.json")
@@ -627,7 +515,6 @@ async fn main() -> anyhow::Result<()> {
         rels: vocab.rels,
         upos: vocab.upos,
         lexicon,
-        phrasal,
         job_tx,
     });
 
@@ -635,8 +522,7 @@ async fn main() -> anyhow::Result<()> {
     spawn_inference_worker(Arc::clone(&state), job_rx);
     info!(
         idle_unload_secs = idle_unload_secs(),
-        lexicon = state.lexicon.entries().len(),
-        phrasal = state.phrasal.len(),
+        lexicon = state.lexicon.entries.len(),
         "model is lazy-loaded on first request, evicted after idle"
     );
 
@@ -658,7 +544,7 @@ async fn main() -> anyhow::Result<()> {
 //
 // These tests require all model artifacts to be present:
 //   model/model.fp16.onnx   model/vocabs.json   model/idiom_classifier.json
-//   dic/lexicon.json         dic/phrasal-verbs.json
+//   dic/lexicon.jsonl
 //
 // Run with:
 //   cargo test -- --include-ignored
@@ -671,7 +557,7 @@ mod e2e {
         let vocab: Vocab =
             serde_json::from_str::<VocabRaw>(&std::fs::read_to_string(VOCAB_PATH)?)?.into();
         let lexicon = mwe::MweLexicon::load(LEXICON_PATH)?;
-        let phrasal = phrasal::PhrasalLexicon::load(PHRASAL_PATH)?;
+
         let tokenizer = Tokenizer::from_file("model/tokenizer.json")
             .map_err(|e| anyhow::anyhow!("tokenizer: {}", e))?;
         let (job_tx, _job_rx) = mpsc::unbounded_channel();
@@ -681,7 +567,6 @@ mod e2e {
             rels: vocab.rels,
             upos: vocab.upos,
             lexicon,
-            phrasal,
             job_tx,
         })
     }
@@ -744,75 +629,5 @@ mod e2e {
             .expect("session error");
     }
 
-    // Phrasal verb detection golden cases.
-    // (sentence, verb lemma, particle, prep)
-    const PHRASAL_CASES: &[(&str, &str, &str, Option<&str>)] = &[
-        ("She came up with a great idea.", "come", "up", Some("with")),
-        ("He gave up smoking last year.", "give", "up", None),
-        ("They put up with the noise.", "put", "up", Some("with")),
-        ("Please turn off the lights.", "turn", "off", None),
-    ];
 
-    // False positive cases: no phrasal verb should be detected.
-    // TODO: "hold to" fires because the infinitive marker "to" (PART → hold VERB)
-    // matches the second-pass arc+inventory check — fix the detector.
-    const PHRASAL_FALSE_POSITIVES: &[(&str, &str, &str)] = &[
-        ("Kyiv should focus on defense and carefully determine which positions are truly necessary to hold.", "hold", "to"),
-        ("Ukraine's broader goal is to turn Pokrovsk.", "turn", "to"),
-        ("In order to push them out of the Hryshyne area.", "push", "in"),
-    ];
-
-    #[test]
-    #[ignore = "requires model artifacts; run with: cargo test -- --include-ignored"]
-    fn phrasal_verb_detection_golden_cases() {
-        let state = build_state().expect("failed to load model artifacts");
-        state
-            .session
-            .with_session(|session| {
-                for &(sent, verb_kw, particle, prep) in PHRASAL_CASES {
-                    let result = run_inference(session, &state, sent)
-                        .unwrap_or_else(|e| panic!("inference failed for {:?}: {}", sent, e));
-
-                    let found = result.phrasal_verbs.iter().any(|pv| {
-                        normalize::lemma(&pv.verb) == verb_kw
-                            && pv.particle == particle
-                            && pv.prep.as_deref() == prep
-                    });
-                    assert!(
-                        found,
-                        "expected phrasal verb ({}, {}, {:?}) in {:?}\n  got: {:?}",
-                        verb_kw,
-                        particle,
-                        prep,
-                        sent,
-                        result
-                            .phrasal_verbs
-                            .iter()
-                            .map(|pv| format!(
-                                "{}+{}{}",
-                                pv.verb,
-                                pv.particle,
-                                pv.prep.as_deref().map(|p| format!("+{p}")).unwrap_or_default()
-                            ))
-                            .collect::<Vec<_>>()
-                    );
-                }
-
-                for &(sent, verb_kw, particle) in PHRASAL_FALSE_POSITIVES {
-                    let result = run_inference(session, &state, sent)
-                        .unwrap_or_else(|e| panic!("inference failed for {:?}: {}", sent, e));
-
-                    let fp = result.phrasal_verbs.iter().find(|pv| {
-                        normalize::lemma(&pv.verb) == verb_kw && pv.particle == particle
-                    });
-                    assert!(
-                        fp.is_none(),
-                        "false positive phrasal verb ({}, {}) should not be detected in {:?}",
-                        verb_kw, particle, sent
-                    );
-                }
-                Ok(())
-            })
-            .expect("session error");
-    }
 }

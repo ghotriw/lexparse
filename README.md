@@ -1,6 +1,6 @@
 # lexparse
 
-Lightweight English NLP microservice: dependency parsing, POS tagging, phrasal verb and MWE (Multi-Word Expression) detection.
+Lightweight English NLP microservice: dependency parsing, POS tagging, and MWE (Multi-Word Expression) detection via Subgraph Isomorphism.
 
 Built with Rust + ONNX Runtime.
 
@@ -62,14 +62,7 @@ curl -X POST http://localhost:3000/parse \
     head: number;
     rel: string
   }[];
-  phrasal_verbs: {
-    verb: string;
-    particle: string;
-    verb_id: number;
-    particle_id: number;
-    prep?: string;
-    prep_id?: number
-  }[];
+
   mwes: {
     surface: string;
     category: "idiom" | "phrasal_verb" | "collocation_phrase" | "proverb_saying";
@@ -93,7 +86,7 @@ Returns `ok`.
 # Unit and lexicon-level tests (no model required)
 cargo test
 
-# Full regression tests including MWE and phrasal verb detection (requires model artifacts)
+# Full regression tests including MWE detection (requires model artifacts)
 cargo test -- --include-ignored
 ```
 
