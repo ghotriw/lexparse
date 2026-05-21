@@ -78,15 +78,15 @@ impl MweLexicon {
 
 #[derive(Debug, Serialize)]
 pub struct MweMatch {
+    pub id: u32,
+    pub pos: Option<String>,
     pub surface: String,
     pub categories: Vec<String>,
     pub has_slot: bool,
     pub token_ids: Vec<usize>,
     pub words: Vec<String>,
     pub span_text: String,
-    pub prob: f32,
     pub discontinuous: bool,
-    pub tree_connected: bool,
 }
 
 pub fn detect(
@@ -128,10 +128,36 @@ pub fn detect(
             
             let mut matched_nodes = Vec::new();
             if crate::matcher::match_tree(i, tree, true, &lemmas, &children, rels, &mut matched_nodes) {
+                let root_idx = matched_nodes[0];
+                let is_phrasal_verb = entry.categories.iter().any(|c| c == "phrasal_verb");
+                
+                if is_phrasal_verb {
+                    // 1. For a phrasal verb, the root must actually be used as a verb
+                    if !is_verb[root_idx] {
+                        continue;
+                    }
+                    // 2. The verb must be the first word among the matched non-slot literal tokens
+                    // (e.g. rejects "to look" matching "look to" because "to" comes before "look")
+                    let min_idx = *matched_nodes.iter().min().unwrap();
+                    if root_idx != min_idx {
+                        continue;
+                    }
+                }
+
                 matched_nodes.sort_unstable();
                 matched_nodes.dedup();
                 
                 let has_slot = has_slot_recursive(tree);
+
+                // HARDCODED IGNORES FOR INTRANSITIVE FALSE POSITIVES
+                // "eat in" is an intransitive phrasal verb. The dictionary builder
+                // aggressively generated a wildcard tree (verb -> SLOT -> in) for it.
+                // We reject this wildcard match to prevent matching "ate in the restaurant",
+                // while still allowing the legitimate continuous usage ("we decided to eat in").
+                if has_slot && entry.phrase == "eat in" {
+                    continue;
+                }
+
                 let lo = *matched_nodes.iter().min().unwrap();
                 let hi = *matched_nodes.iter().max().unwrap();
                 let discontinuous = hi - lo + 1 != matched_nodes.len();
@@ -147,30 +173,22 @@ pub fn detect(
                     .replace(" ?", "?");
                 
                 cands.push(MweMatch {
+                    id: entry.id,
+                    pos: entry.pos.clone(),
                     surface: entry.phrase.clone(),
                     categories: entry.categories.clone(),
                     has_slot,
                     token_ids: matched_nodes.iter().map(|&j| j + 1).collect(),
                     words: matched_nodes.iter().map(|&j| words[j].clone()).collect(),
                     span_text,
-                    prob: 1.0,
                     discontinuous,
-                    tree_connected: true, // graph isomorphism guarantees tree connectivity
                 });
             }
         }
     }
 
-    // Filter overlapping/duplicate spans
-    let spans: Vec<(usize, usize, f32)> = cands
-        .iter()
-        .map(|c| {
-            let lo = c.token_ids[0] - 1;
-            let hi = c.token_ids.last().unwrap() - 1;
-            (lo, hi, c.prob)
-        })
-        .collect();
-    let keep = keep_mask(&spans);
+    // Filter overlapping/duplicate spans based on exact token collision
+    let keep = keep_mask(&cands);
     cands
         .into_iter()
         .zip(keep)
@@ -185,18 +203,38 @@ fn has_slot_recursive(node: &LexiconTreeNode) -> bool {
     node.deps.iter().any(has_slot_recursive)
 }
 
-fn keep_mask(spans: &[(usize, usize, f32)]) -> Vec<bool> {
-    let n = spans.len();
+fn keep_mask(cands: &[MweMatch]) -> Vec<bool> {
+    let n = cands.len();
     let mut keep = vec![true; n];
     for i in 0..n {
-        let (ilo, ihi, iprob) = spans[i];
-        for (j, &(jlo, jhi, jprob)) in spans.iter().enumerate() {
+        for j in 0..n {
             if i == j {
                 continue;
             }
-            if jlo <= ilo && jhi >= ihi {
-                let strictly = jlo < ilo || jhi > ihi;
-                if strictly || jprob > iprob || (jprob == iprob && j < i) {
+            // Check for exact token collision
+            let mut overlap = false;
+            for &t1 in &cands[i].token_ids {
+                if cands[j].token_ids.contains(&t1) {
+                    overlap = true;
+                    break;
+                }
+            }
+            if overlap {
+                let len_i = cands[i].token_ids.len();
+                let len_j = cands[j].token_ids.len();
+                
+                let gap_i = cands[i].token_ids.last().unwrap() - cands[i].token_ids.first().unwrap() + 1 - len_i;
+                let gap_j = cands[j].token_ids.last().unwrap() - cands[j].token_ids.first().unwrap() + 1 - len_j;
+                
+                let j_wins = if len_j != len_i {
+                    len_j > len_i // longer phrase wins
+                } else if gap_j != gap_i {
+                    gap_j < gap_i // more continuous phrase wins
+                } else {
+                    j < i // tie-breaker
+                };
+                
+                if j_wins {
                     keep[i] = false;
                     break;
                 }

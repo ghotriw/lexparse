@@ -37,6 +37,7 @@ struct WikiForm {
 struct WikiEntry {
     word: Option<String>,
     pos: Option<String>,
+    categories: Option<Vec<String>>,
     senses: Option<Vec<WikiSense>>,
     forms: Option<Vec<WikiForm>>,
 }
@@ -61,12 +62,15 @@ fn hash_string(s: &str) -> u32 {
 }
 
 fn replace_slots(text: &str, re_poss: &Regex, re_obj: &Regex) -> String {
-    let s = re_poss.replace_all(text, "SLOT's");
-    re_obj.replace_all(&s, "SLOT").into_owned()
+    let s = re_poss.replace_all(text, "someone's");
+    re_obj.replace_all(&s, "someone").into_owned()
 }
 
 fn extract_tree(node: &ParsedToken, tokens: &[ParsedToken]) -> LexiconTreeNode {
-    let is_slot = node.lemma == "SLOT" || node.lemma == "slot";
+    let is_slot = matches!(
+        node.lemma.as_str(),
+        "someone" | "somebody" | "something" | "one"
+    ) && node.rel != "root" && node.head != 0;
 
     let mut tree = LexiconTreeNode {
         lemma: if is_slot { "SLOT".to_string() } else { node.lemma.clone() },
@@ -87,7 +91,19 @@ fn extract_tree(node: &ParsedToken, tokens: &[ParsedToken]) -> LexiconTreeNode {
 
 fn build_mwe_tree(tokens: &[ParsedToken]) -> Option<LexiconTreeNode> {
     let root = tokens.iter().find(|t| t.rel == "root" || t.head == 0)?;
-    let raw = extract_tree(root, tokens);
+    let mut raw = extract_tree(root, tokens);
+
+    // PATCH: "be there" parsed in isolation usually makes "there" an `expl` (expletive).
+    // But the idiom "be there" means "be present", where "there" is an `advmod`.
+    // We rewrite `expl` to `advmod` for "there" when attached to "be" to avoid false
+    // positives on the extremely common existential "there is/are".
+    if raw.lemma == "be" || raw.lemma == "is" || raw.lemma == "are" || raw.lemma == "was" || raw.lemma == "were" {
+        for child in &mut raw.deps {
+            if child.lemma == "there" && child.rel == "expl" {
+                child.rel = "advmod".to_string();
+            }
+        }
+    }
 
     // Prune SLOT deps is already handled inside extract_tree (if is_slot is true, it doesn't add deps)
     Some(raw)
@@ -139,19 +155,32 @@ fn main() -> Result<()> {
             let mut tags = HashSet::new();
             let mut glosses = Vec::new();
 
+            if let Some(top_cats) = &entry.categories {
+                for cat in top_cats {
+                    for (target, mapped) in &config.target_categories {
+                        if cat == target || cat.starts_with(&format!("{} ", target)) {
+                            is_target = true;
+                            matched_types.insert(mapped.clone());
+                        }
+                    }
+                }
+            }
+
             if let Some(senses) = entry.senses {
                 for sense in senses {
-                    if let Some(categories) = sense.categories {
+                    if let Some(categories) = &sense.categories {
                         for cat in categories {
-                            if let Some(mapped_cat) = config.target_categories.get(cat.as_str()) {
-                                is_target = true;
-                                matched_types.insert(mapped_cat.clone());
+                            for (target, mapped) in &config.target_categories {
+                                if cat == target || cat.starts_with(&format!("{} ", target)) {
+                                    is_target = true;
+                                    matched_types.insert(mapped.clone());
 
-                                if let Some(t) = &sense.tags {
-                                    for tg in t { tags.insert(tg.clone()); }
-                                }
-                                if let Some(g) = &sense.glosses {
-                                    glosses.extend(g.clone());
+                                    if let Some(t) = &sense.tags {
+                                        for tg in t { tags.insert(tg.clone()); }
+                                    }
+                                    if let Some(g) = &sense.glosses {
+                                        glosses.extend(g.clone());
+                                    }
                                 }
                             }
                         }
@@ -168,7 +197,11 @@ fn main() -> Result<()> {
             variants.insert(word.clone());
             if let Some(forms) = entry.forms {
                 for form in forms {
-                    if let Some(f) = form.form { variants.insert(f); }
+                    if let Some(f) = form.form { 
+                        if f.trim().split_whitespace().count() >= 2 {
+                            variants.insert(f); 
+                        }
+                    }
                 }
             }
 
@@ -176,7 +209,7 @@ fn main() -> Result<()> {
             for v in variants {
                 let replaced = replace_slots(&v, &re_poss, &re_obj);
                 if re_prep_end.is_match(&replaced) {
-                    variants_to_parse.push(format!("{} SLOT", replaced));
+                    variants_to_parse.push(format!("{} someone", replaced));
                 }
                 variants_to_parse.push(replaced);
             }
@@ -255,6 +288,38 @@ fn main() -> Result<()> {
                         cand.trees.push(tree);
                     }
                 }
+            }
+
+            // SYNTHETIC TREE INJECTION
+            // The ONNX parser often fails to generate a proper `case` tree for "verb prep someone"
+            // (e.g. it parses "go down someone" as `go -> down (advmod)` instead of `go -> someone -> down (case)`).
+            // To ensure phrasal verbs like "go down" can match "go down the stairs", we manually inject
+            // the `verb -> SLOT (obl) -> prep (case)` tree for 2-word phrases ending in a preposition.
+            let parts: Vec<&str> = cand.phrase.split_whitespace().collect();
+            if parts.len() == 2 && re_prep_end.is_match(parts[1]) {
+                let verb_lemma = parts[0].to_string();
+                let prep_lemma = parts[1].to_string();
+                let synthetic_tree = lexparse::mwe::LexiconTreeNode {
+                    lemma: verb_lemma,
+                    rel: "root".to_string(),
+                    is_slot: false,
+                    deps: vec![
+                        lexparse::mwe::LexiconTreeNode {
+                            lemma: "SLOT".to_string(),
+                            rel: "obl".to_string(),
+                            is_slot: true,
+                            deps: vec![
+                                lexparse::mwe::LexiconTreeNode {
+                                    lemma: prep_lemma,
+                                    rel: "case".to_string(),
+                                    is_slot: false,
+                                    deps: vec![],
+                                }
+                            ]
+                        }
+                    ]
+                };
+                cand.trees.push(synthetic_tree);
             }
 
             if !cand.trees.is_empty() {
