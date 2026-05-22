@@ -26,6 +26,7 @@ pub const MODEL_PATH: &str = "model/model.onnx";
 pub const VOCAB_PATH: &str = "model/vocabs.json";
 
 pub const LEXICON_PATH: &str = "dic/lexicon.jsonl";
+pub const CUSTOM_LEXICON_PATH: &str = "dic/custom.jsonl";
 
 // --- types ---
 
@@ -294,7 +295,8 @@ pub fn run_inference(
     // stage3 localizes training spans with the same s_pos head → no skew.
     let is_verb: Vec<bool> = (0..n).map(|k| upos_str(k + 1) == "VERB").collect();
 
-    let mwes = mwe::detect(&words, &is_verb, &heads, &state.lexicon);
+    let word_rels: Vec<String> = tokens.iter().map(|t| t.rel.clone()).collect();
+    let mwes = mwe::detect(&words, &is_verb, &heads, &word_rels, &state.lexicon);
 
     info!(
         words = n,
@@ -388,7 +390,7 @@ mod e2e {
     fn build_state() -> anyhow::Result<AppState> {
         let vocab: Vocab =
             serde_json::from_str::<VocabRaw>(&std::fs::read_to_string(VOCAB_PATH)?)?.into();
-        let lexicon = mwe::MweLexicon::load(LEXICON_PATH)?;
+        let lexicon = mwe::MweLexicon::load_with_custom(LEXICON_PATH, CUSTOM_LEXICON_PATH)?;
 
         let tokenizer = Tokenizer::from_file("model/tokenizer.json")
             .map_err(|e| anyhow::anyhow!("tokenizer: {}", e))?;

@@ -4,6 +4,19 @@ input_file = "./tmp/raw-wiktextract-data.jsonl"
 # Only include entries with this lang_code (leave empty to disable filtering)
 lang_code = "en"
 
+# Phrases to exclude from the generated lexicon regardless of category.
+# Use this for entries that cause systematic false positives (too generic,
+# too rare, or replaced by a corrected version in dic/custom.jsonl).
+phrase_blocklist = [
+  "on the wallaby",  # `wall` prefix-matches `wallaby` via eq(); obscure Australian slang
+  "that is",         # be+that fires on any relative clause / complement
+  "is that so",      # be+that+slot fires on any `was that ...` construction
+  "be one thing",    # slot too wide; corrected version (with `one` fixed) in custom.jsonl
+  "so to say",       # leading slot makes `so` optional; corrected in custom.jsonl
+  "as one man",      # slot too wide; corrected in custom.jsonl
+  "in one voice",    # slot too wide; corrected in custom.jsonl
+]
+
 # Mapping of Wiktionary categories to internal parser category names
 [target_categories]
 "English idioms" = "idiom"

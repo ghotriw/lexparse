@@ -25,6 +25,8 @@ struct BuilderConfig {
     target_categories: std::collections::HashMap<String, String>,
     #[serde(default)]
     pos_filter: std::collections::HashMap<String, Vec<String>>,
+    #[serde(default)]
+    phrase_blocklist: Vec<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -208,6 +210,9 @@ fn main() -> Result<()> {
         }
 
         if matched_types.is_empty() || processed_words.contains(&word) {
+            continue;
+        }
+        if config.phrase_blocklist.contains(&word) {
             continue;
         }
         processed_words.insert(word.clone());

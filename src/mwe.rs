@@ -32,32 +32,46 @@ pub struct MweLexicon {
 
 impl MweLexicon {
     pub fn load(path: &str) -> anyhow::Result<Self> {
-        use std::io::BufRead;
-        let file = std::fs::File::open(path)?;
-        let reader = std::io::BufReader::new(file);
+        Self::load_paths(&[path])
+    }
 
+    /// Load the main lexicon and, if `custom_path` exists, append entries from it.
+    pub fn load_with_custom(main_path: &str, custom_path: &str) -> anyhow::Result<Self> {
+        if std::path::Path::new(custom_path).exists() {
+            Self::load_paths(&[main_path, custom_path])
+        } else {
+            Self::load_paths(&[main_path])
+        }
+    }
+
+    fn load_paths(paths: &[&str]) -> anyhow::Result<Self> {
+        use std::io::BufRead;
         let mut entries = Vec::new();
         let mut index: HashMap<String, Vec<usize>> = HashMap::new();
 
-        for line in reader.lines() {
-            let line = line?;
-            if line.trim().is_empty() {
-                continue;
+        for &path in paths {
+            let file = std::fs::File::open(path)?;
+            let reader = std::io::BufReader::new(file);
+            for line in reader.lines() {
+                let line = line?;
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let Ok(entry) = serde_json::from_str::<LexiconEntry>(&line) else {
+                    continue;
+                };
+                // Entries with fewer than two fixed lemmas act as single-word
+                // wildcards and flood the output — skip them.
+                if matcher::fixed_count(&entry.elements) < 2 {
+                    continue;
+                }
+                let Some(first) = matcher::first_fixed(&entry.elements) else {
+                    continue;
+                };
+                let idx = entries.len();
+                index.entry(first.to_string()).or_default().push(idx);
+                entries.push(entry);
             }
-            let Ok(entry) = serde_json::from_str::<LexiconEntry>(&line) else {
-                continue;
-            };
-            // Entries with fewer than two fixed lemmas act as single-word
-            // wildcards and flood the output — skip them.
-            if matcher::fixed_count(&entry.elements) < 2 {
-                continue;
-            }
-            let Some(first) = matcher::first_fixed(&entry.elements) else {
-                continue;
-            };
-            let idx = entries.len();
-            index.entry(first.to_string()).or_default().push(idx);
-            entries.push(entry);
         }
 
         Ok(Self { entries, index })
@@ -87,7 +101,11 @@ fn is_phrasal_verb(entry: &LexiconEntry) -> bool {
 /// (particle → verb, typical for adverbial particles: "look up the word") or
 /// via one noun hop (particle → noun → verb, typical for prepositional particles
 /// in UD: "hold with such nonsense" → with→nonsense(case)→hold(obl)).
-fn phrasal_arc_ok(idxs: &[usize], is_verb: &[bool], heads: &[usize]) -> bool {
+///
+/// The 1-hop path explicitly blocks `mark` deprel: infinitival `to` in
+/// "went to find" has deprel=mark and points to the infinitive, not the main
+/// verb — it is not a particle and must not trigger the phrasal-verb gate.
+fn phrasal_arc_ok(idxs: &[usize], is_verb: &[bool], heads: &[usize], rels: &[String]) -> bool {
     let verb = idxs[0];
     if !is_verb.get(verb).copied().unwrap_or(false) {
         return false;
@@ -100,14 +118,20 @@ fn phrasal_arc_ok(idxs: &[usize], is_verb: &[bool], heads: &[usize]) -> bool {
     if particle_head == verb + 1 {
         return true;
     }
-    // Indirect via case marker: particle → noun → verb
-    particle_head > 0 && heads.get(particle_head).copied() == Some(verb + 1)
+    // Indirect via case marker: particle → noun → verb.
+    // Exclude `mark` (infinitival `to`) — it attaches to the complement verb,
+    // not to the governing verb, and is not a phrasal-verb particle.
+    let particle_rel = rels.get(particle).map(String::as_str).unwrap_or("");
+    particle_head > 0
+        && heads.get(particle_head).copied() == Some(verb + 1)
+        && particle_rel != "mark"
 }
 
 pub fn detect(
     words: &[String],
     is_verb: &[bool],
     heads: &[usize],
+    rels: &[String],
     lexicon: &MweLexicon,
 ) -> Vec<MweMatch> {
     let lemmas = matcher::lemmatize_pos(words, is_verb);
@@ -129,7 +153,7 @@ pub fn detect(
             continue;
         };
 
-        if is_phrasal_verb(entry) && !phrasal_arc_ok(&idxs, is_verb, heads) {
+        if is_phrasal_verb(entry) && !phrasal_arc_ok(&idxs, is_verb, heads, rels) {
             continue;
         }
 

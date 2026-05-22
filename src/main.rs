@@ -14,7 +14,7 @@ use tokio::sync::{mpsc, oneshot};
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
-use lexparse::*;
+use lexparse::{CUSTOM_LEXICON_PATH, *};
 
 #[derive(Deserialize)]
 struct ParseBatchRequest {
@@ -132,8 +132,8 @@ async fn main() -> anyhow::Result<()> {
     info!("loading vocab from {VOCAB_PATH}");
     let vocab: Vocab = serde_json::from_str::<VocabRaw>(&std::fs::read_to_string(VOCAB_PATH)?)?.into();
 
-    info!("loading lexicon from {LEXICON_PATH}");
-    let lexicon = lexparse::mwe::MweLexicon::load(LEXICON_PATH)?;
+    info!("loading lexicon from {LEXICON_PATH} + {CUSTOM_LEXICON_PATH}");
+    let lexicon = lexparse::mwe::MweLexicon::load_with_custom(LEXICON_PATH, CUSTOM_LEXICON_PATH)?;
 
     info!("loading tokenizer");
     let tokenizer = tokenizers::Tokenizer::from_file("model/tokenizer.json")
