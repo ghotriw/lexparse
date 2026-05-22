@@ -1,18 +1,20 @@
+//! Dictionary builder: scans a Wiktionary JSONL dump for multi-word entries in
+//! the target categories and emits a slot/gap lexicon (`dic/lexicon.jsonl`).
+//!
+//! No model is needed — each MWE pattern is derived directly from the headword
+//! string: placeholder words ("someone", "one's", …) become `Slot`, every other
+//! token becomes a fixed `Word(lemma)`.
+
 use anyhow::Result;
-use lexparse::mwe::LexiconTreeNode;
-use lexparse::{
-    run_inference, AppState, LazySession, ParsedToken, Vocab, VocabRaw,
-    LEXICON_PATH, VOCAB_PATH,
-};
-use regex::Regex;
-use serde::{Deserialize, Serialize};
-use std::collections::{HashSet, hash_map::DefaultHasher};
+use lexparse::matcher::{self, Element};
+use lexparse::mwe::LexiconEntry;
+use lexparse::{normalize, LEXICON_PATH};
+use serde::Deserialize;
+use std::collections::hash_map::DefaultHasher;
+use std::collections::HashSet;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Write};
-use std::sync::Arc;
-use tokio::sync::mpsc;
-use tokenizers::Tokenizer;
 use tracing::info;
 
 #[derive(Deserialize, Debug)]
@@ -29,30 +31,11 @@ struct WikiSense {
 }
 
 #[derive(Deserialize, Debug)]
-struct WikiForm {
-    form: Option<String>,
-}
-
-#[derive(Deserialize, Debug)]
 struct WikiEntry {
     word: Option<String>,
     pos: Option<String>,
     categories: Option<Vec<String>>,
     senses: Option<Vec<WikiSense>>,
-    forms: Option<Vec<WikiForm>>,
-}
-
-#[derive(Serialize, Debug)]
-struct BuilderCandidate {
-    id: u32,
-    phrase: String,
-    categories: Vec<String>,
-    pos: Option<String>,
-    tags: Vec<String>,
-    definition: Option<String>,
-    #[serde(skip)]
-    variants_to_parse: Vec<String>,
-    trees: Vec<LexiconTreeNode>,
 }
 
 fn hash_string(s: &str) -> u32 {
@@ -61,276 +44,200 @@ fn hash_string(s: &str) -> u32 {
     hasher.finish() as u32
 }
 
-fn replace_slots(text: &str, re_poss: &Regex, re_obj: &Regex) -> String {
-    let s = re_poss.replace_all(text, "someone's");
-    re_obj.replace_all(&s, "someone").into_owned()
+/// True for the possessive clitic tokens that `normalize::tokenize` splits off
+/// (e.g. "one's" -> "one" + "'s"). They carry no content and must be dropped.
+fn is_clitic(tok: &str) -> bool {
+    matches!(tok, "'s" | "’s" | "'" | "’")
 }
 
-fn extract_tree(node: &ParsedToken, tokens: &[ParsedToken]) -> LexiconTreeNode {
-    let is_slot = matches!(
-        node.lemma.as_str(),
-        "someone" | "somebody" | "something" | "one"
-    ) && node.rel != "root" && node.head != 0;
-
-    let mut tree = LexiconTreeNode {
-        lemma: if is_slot { "SLOT".to_string() } else { node.lemma.clone() },
-        rel: node.rel.clone(),
-        is_slot,
-        deps: vec![],
-    };
-
-    let deps: Vec<LexiconTreeNode> = tokens
-        .iter()
-        .filter(|c| c.head == node.id)
-        .map(|c| extract_tree(c, tokens))
-        .collect();
-    tree.deps = deps;
-
-    tree
+/// Connector words that may sit between two placeholder slots in a headword
+/// ("someone or something"); collapsed away so the run becomes a single slot.
+fn is_connector(tok: &str) -> bool {
+    matches!(tok.to_lowercase().as_str(), "or" | "and" | "nor")
 }
 
-fn build_mwe_tree(tokens: &[ParsedToken]) -> Option<LexiconTreeNode> {
-    let root = tokens.iter().find(|t| t.rel == "root" || t.head == 0)?;
-    let mut raw = extract_tree(root, tokens);
-
-    // PATCH: "be there" parsed in isolation usually makes "there" an `expl` (expletive).
-    // But the idiom "be there" means "be present", where "there" is an `advmod`.
-    // We rewrite `expl` to `advmod` for "there" when attached to "be" to avoid false
-    // positives on the extremely common existential "there is/are".
-    if raw.lemma == "be" || raw.lemma == "is" || raw.lemma == "are" || raw.lemma == "was" || raw.lemma == "were" {
-        for child in &mut raw.deps {
-            if child.lemma == "there" && child.rel == "expl" {
-                child.rel = "advmod".to_string();
-            }
+/// Convert a headword string into a slot/gap element pattern.
+fn phrase_to_elements(phrase: &str) -> Vec<Element> {
+    let mut raw: Vec<Element> = Vec::new();
+    for tok in normalize::tokenize(phrase) {
+        if is_clitic(&tok) {
+            continue;
+        }
+        if normalize::is_slot_token(&tok) {
+            raw.push(Element::Slot);
+        } else {
+            raw.push(Element::Word(normalize::lemma(&tok)));
         }
     }
 
-    // Prune SLOT deps is already handled inside extract_tree (if is_slot is true, it doesn't add deps)
-    Some(raw)
+    // Drop connector words trapped between two slots, then collapse runs of
+    // adjacent slots into one.
+    let mut out: Vec<Element> = Vec::new();
+    for (i, el) in raw.iter().enumerate() {
+        if let Element::Word(w) = el {
+            let prev_slot = matches!(raw.get(i.wrapping_sub(1)), Some(Element::Slot));
+            let next_slot = matches!(raw.get(i + 1), Some(Element::Slot));
+            if prev_slot && next_slot && is_connector(w) {
+                continue;
+            }
+        }
+        if matches!(el, Element::Slot) && matches!(out.last(), Some(Element::Slot)) {
+            continue;
+        }
+        out.push(el.clone());
+    }
+    out
 }
 
 fn main() -> Result<()> {
     use tracing_subscriber::EnvFilter;
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new("info,ort=warn"))
+        .with_env_filter(EnvFilter::new("info"))
         .init();
-    info!("Starting native Rust dictionary builder...");
+    info!("Starting dictionary builder...");
 
-    let re_poss = Regex::new(r"(?i)\b(someone's|one's|somebody's)\b").unwrap();
-    let re_obj = Regex::new(r"(?i)\b(someone|something|somebody|one)\b").unwrap();
-    // Prepositions and particles that often take an object in a sentence.
-    // If a variant ends with one of these, we will generate an extra variant with " SLOT".
-    let re_prep_end = Regex::new(r"(?i)\b(from|with|to|in|on|at|for|about|of|into|onto|upon|out|by|as|after|before|over|under|through|against|up|down|around|away|back|off)$").unwrap();
-
-    let config_path = std::env::args().nth(1).unwrap_or_else(|| "builder_config.toml".to_string());
+    let config_path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "builder_config.toml".to_string());
     let config_str = std::fs::read_to_string(&config_path)
         .map_err(|e| anyhow::anyhow!("Failed to read config from {}: {}", config_path, e))?;
     let config: BuilderConfig = toml::from_str(&config_str)
         .map_err(|e| anyhow::anyhow!("Failed to parse TOML from {}: {}", config_path, e))?;
-    info!("Loaded config from {}: {:?}", config_path, config);
+    info!("Loaded config from {}", config_path);
 
     let file = File::open(&config.input_file)?;
     let reader = BufReader::new(file);
 
-    let mut candidates = Vec::new();
+    let mut out_file = File::create(LEXICON_PATH)?;
     let mut processed_words = HashSet::new();
-    let mut line_count = 0;
+    let mut line_count = 0usize;
+    let mut written = 0usize;
+    let mut skipped_too_short = 0usize;
 
-    info!("Scanning Wiktionary Dump...");
+    info!("Scanning Wiktionary dump...");
     for line in reader.lines() {
         let line = line?;
         line_count += 1;
         if line_count % 50_000 == 0 {
-            info!("Scanned {} lines...", line_count);
+            info!("Scanned {} lines, wrote {} entries...", line_count, written);
         }
 
-        if let Ok(entry) = serde_json::from_str::<WikiEntry>(&line) {
-            let Some(word) = entry.word else { continue };
-            if word.trim().split_whitespace().count() < 2 {
-                continue;
-            }
+        let Ok(entry) = serde_json::from_str::<WikiEntry>(&line) else {
+            continue;
+        };
+        let Some(word) = entry.word else { continue };
+        if word.trim().split_whitespace().count() < 2 {
+            continue;
+        }
 
-            let mut is_target = false;
-            let mut matched_types = HashSet::new();
-            let mut tags = HashSet::new();
-            let mut glosses = Vec::new();
+        let mut matched_types = HashSet::new();
+        let mut tags = HashSet::new();
+        let mut glosses = Vec::new();
 
-            if let Some(top_cats) = &entry.categories {
-                for cat in top_cats {
-                    for (target, mapped) in &config.target_categories {
-                        if cat == target || cat.starts_with(&format!("{} ", target)) {
-                            is_target = true;
-                            matched_types.insert(mapped.clone());
-                        }
-                    }
-                }
-            }
-
-            if let Some(senses) = entry.senses {
-                for sense in senses {
-                    if let Some(categories) = &sense.categories {
-                        for cat in categories {
-                            for (target, mapped) in &config.target_categories {
-                                if cat == target || cat.starts_with(&format!("{} ", target)) {
-                                    is_target = true;
-                                    matched_types.insert(mapped.clone());
-
-                                    if let Some(t) = &sense.tags {
-                                        for tg in t { tags.insert(tg.clone()); }
-                                    }
-                                    if let Some(g) = &sense.glosses {
-                                        glosses.extend(g.clone());
-                                    }
-                                }
+        let mut consider = |cats: &[String], sense: Option<&WikiSense>| {
+            for cat in cats {
+                for (target, mapped) in &config.target_categories {
+                    if cat == target || cat.starts_with(&format!("{} ", target)) {
+                        matched_types.insert(mapped.clone());
+                        if let Some(s) = sense {
+                            if let Some(t) = &s.tags {
+                                tags.extend(t.iter().cloned());
+                            }
+                            if let Some(g) = &s.glosses {
+                                glosses.extend(g.iter().cloned());
                             }
                         }
                     }
                 }
             }
+        };
 
-            if !is_target || processed_words.contains(&word) {
-                continue;
-            }
-            processed_words.insert(word.clone());
-
-            let mut variants = HashSet::new();
-            variants.insert(word.clone());
-            if let Some(forms) = entry.forms {
-                for form in forms {
-                    if let Some(f) = form.form { 
-                        if f.trim().split_whitespace().count() >= 2 {
-                            variants.insert(f); 
-                        }
-                    }
-                }
-            }
-
-            let mut variants_to_parse = Vec::new();
-            for v in variants {
-                let replaced = replace_slots(&v, &re_poss, &re_obj);
-                if re_prep_end.is_match(&replaced) {
-                    variants_to_parse.push(format!("{} someone", replaced));
-                }
-                variants_to_parse.push(replaced);
-            }
-
-            candidates.push(BuilderCandidate {
-                id: hash_string(&word),
-                phrase: word,
-                categories: matched_types.into_iter().collect(),
-                pos: entry.pos,
-                tags: tags.into_iter().collect(),
-                definition: glosses.into_iter().next(),
-                variants_to_parse,
-                trees: vec![],
-            });
+        if let Some(top_cats) = &entry.categories {
+            consider(top_cats, None);
         }
+        if let Some(senses) = &entry.senses {
+            for sense in senses {
+                if let Some(cats) = &sense.categories {
+                    consider(cats, Some(sense));
+                }
+            }
+        }
+
+        if matched_types.is_empty() || processed_words.contains(&word) {
+            continue;
+        }
+        processed_words.insert(word.clone());
+
+        let elements = phrase_to_elements(&word);
+        if matcher::fixed_count(&elements) < 2 {
+            skipped_too_short += 1;
+            continue;
+        }
+
+        let record = LexiconEntry {
+            id: hash_string(&word),
+            phrase: word,
+            categories: matched_types.into_iter().collect(),
+            pos: entry.pos,
+            definition: glosses.into_iter().next(),
+            tags: tags.into_iter().collect(),
+            elements,
+        };
+        writeln!(out_file, "{}", serde_json::to_string(&record)?)?;
+        written += 1;
     }
 
-    info!("Scanned {} lines, found {} MWE candidates.", line_count, candidates.len());
-
-    // Prepare Model State
-    info!("loading vocab from {VOCAB_PATH}");
-    let vocab: Vocab = serde_json::from_str::<VocabRaw>(&std::fs::read_to_string(VOCAB_PATH)?)?.into();
-
-    info!("loading tokenizer");
-    let tokenizer = Tokenizer::from_file("model/tokenizer.json")
-        .map_err(|e| anyhow::anyhow!("tokenizer: {}", e))?;
-
-    let (job_tx, _job_rx) = mpsc::unbounded_channel();
-
-    let state = Arc::new(AppState {
-        session: LazySession::new(),
-        tokenizer,
-        rels: vocab.rels,
-        upos: vocab.upos,
-        lexicon: lexparse::mwe::MweLexicon { entries: vec![], index: std::collections::HashMap::new() }, // dummy empty lexicon since we don't need detection
-        job_tx,
-    });
-
-    info!("Generating parse trees natively...");
-
-    let total = candidates.len();
-
-    // Resumption logic
-    let mut already_processed = HashSet::new();
-    if std::path::Path::new(LEXICON_PATH).exists() {
-        if let Ok(file) = File::open(LEXICON_PATH) {
-            let reader = BufReader::new(file);
-            for line in reader.lines().map_while(Result::ok) {
-                if let Ok(entry) = serde_json::from_str::<lexparse::mwe::LexiconEntry>(&line) {
-                    already_processed.insert(entry.phrase);
-                }
-            }
-        }
-        info!("Resuming: found {} already processed phrases.", already_processed.len());
-    }
-
-    let mut out_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(LEXICON_PATH)?;
-
-    state.session.with_session(|session| {
-        for (i, cand) in candidates.iter_mut().enumerate() {
-            if already_processed.contains(&cand.phrase) {
-                continue;
-            }
-
-            if i % 10 == 0 || i == total - 1 {
-                let pct = (i * 100) / total;
-                info!("🚀 Generating trees: [{}/{}] ({}%)", i, total, pct);
-            }
-
-            for var in &cand.variants_to_parse {
-                if let Ok(res) = run_inference(session, &state, var) {
-                    if let Some(tree) = build_mwe_tree(&res.tokens) {
-                        cand.trees.push(tree);
-                    }
-                }
-            }
-
-            // SYNTHETIC TREE INJECTION
-            // The ONNX parser often fails to generate a proper `case` tree for "verb prep someone"
-            // (e.g. it parses "go down someone" as `go -> down (advmod)` instead of `go -> someone -> down (case)`).
-            // To ensure phrasal verbs like "go down" can match "go down the stairs", we manually inject
-            // the `verb -> SLOT (obl) -> prep (case)` tree for 2-word phrases ending in a preposition.
-            let parts: Vec<&str> = cand.phrase.split_whitespace().collect();
-            if parts.len() == 2 && re_prep_end.is_match(parts[1]) {
-                let verb_lemma = parts[0].to_string();
-                let prep_lemma = parts[1].to_string();
-                let synthetic_tree = lexparse::mwe::LexiconTreeNode {
-                    lemma: verb_lemma,
-                    rel: "root".to_string(),
-                    is_slot: false,
-                    deps: vec![
-                        lexparse::mwe::LexiconTreeNode {
-                            lemma: "SLOT".to_string(),
-                            rel: "obl".to_string(),
-                            is_slot: true,
-                            deps: vec![
-                                lexparse::mwe::LexiconTreeNode {
-                                    lemma: prep_lemma,
-                                    rel: "case".to_string(),
-                                    is_slot: false,
-                                    deps: vec![],
-                                }
-                            ]
-                        }
-                    ]
-                };
-                cand.trees.push(synthetic_tree);
-            }
-
-            if !cand.trees.is_empty() {
-                let j = serde_json::to_string(&cand)?;
-                writeln!(out_file, "{}", j)?;
-            }
-        }
-        Ok::<(), anyhow::Error>(())
-    })?;
-
-    info!("All done! Lexicon generated at {}", LEXICON_PATH);
-
+    info!(
+        "Done. Scanned {} lines, wrote {} entries to {} ({} skipped: < 2 fixed words).",
+        line_count, written, LEXICON_PATH, skipped_too_short
+    );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pat(p: &str) -> Vec<Element> {
+        phrase_to_elements(p)
+    }
+
+    #[test]
+    fn plain_phrase() {
+        assert_eq!(
+            pat("spill the beans"),
+            vec![
+                Element::Word("spill".into()),
+                Element::Word("the".into()),
+                Element::Word("bean".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn possessive_placeholder_becomes_slot() {
+        // "lose one's mind" -> lose <slot> mind  ("'s" clitic dropped)
+        assert_eq!(
+            pat("lose one's mind"),
+            vec![
+                Element::Word("lose".into()),
+                Element::Slot,
+                Element::Word("mind".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn connector_between_slots_collapsed() {
+        // "someone or something" collapses to a single slot
+        let p = pat("give someone or something away");
+        assert_eq!(
+            p,
+            vec![
+                Element::Word("give".into()),
+                Element::Slot,
+                Element::Word("away".into()),
+            ]
+        );
+    }
 }

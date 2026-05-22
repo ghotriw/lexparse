@@ -294,15 +294,7 @@ pub fn run_inference(
     // stage3 localizes training spans with the same s_pos head → no skew.
     let is_verb: Vec<bool> = (0..n).map(|k| upos_str(k + 1) == "VERB").collect();
 
-    let rels: Vec<String> = tokens.iter().map(|t| t.rel.clone()).collect();
-
-    let mwes = mwe::detect(
-        &words,
-        &is_verb,
-        &heads,
-        &rels,
-        &state.lexicon,
-    );
+    let mwes = mwe::detect(&words, &is_verb, &heads, &state.lexicon);
 
     info!(
         words = n,
@@ -383,7 +375,7 @@ pub fn build_session() -> anyhow::Result<Session> {
 // --- end-to-end regression tests ---
 //
 // These tests require all model artifacts to be present:
-//   model/model.onnx   model/vocabs.json   model/idiom_classifier.json
+//   model/model.onnx   model/vocabs.json   model/tokenizer.json
 //   dic/lexicon.jsonl
 //
 // Run with:
@@ -416,9 +408,10 @@ mod e2e {
     // surface is the winning entry after overlap resolution — run with --nocapture to see
     // what the model actually returns if a case starts failing.
     const MWE_CASES: &[(&str, &str)] = &[
-        ("You have an audition today? Break a leg!", "Break a leg!"),
+        ("You have an audition today? Break a leg!", "break a leg"),
         ("He spilled the beans about the surprise party.", "spill the beans"),
         ("After years of hard work, she finally kicked the bucket.", "kick the bucket"),
+        ("She was over the moon when she heard the news.", "over the moon"),
     ];
 
     #[test]
@@ -459,10 +452,10 @@ mod e2e {
                 for m in &result.mwes {
                     println!("  surface: {:?}, words: {:?}", m.surface, m.words);
                 }
+                // A single-word match (one fixed lemma) must never surface —
+                // the lexicon drops entries with < 2 fixed words.
                 for m in &result.mwes {
-                    assert_ne!(m.surface, "itsy-bitsy", "should not match 'its' to 'itsy-bitsy'");
-                    assert_ne!(m.surface, "wrap someone or something (up†) (in something)", "should not match single-word 'wrapped'");
-                    assert_ne!(m.surface, "wrap someone or something (up†) (with something)", "should not match single-word 'wrapped'");
+                    assert!(m.token_ids.len() >= 2, "single-token MWE: {:?}", m.surface);
                 }
                 Ok(())
             })
