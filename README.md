@@ -68,6 +68,7 @@ curl -X POST http://localhost:3000/parse \
     id: number;              // lexicon entry id
     pos: string | null;      // syntactic category of the whole MWE ("verb", "noun", …)
     phrase: string;          // canonical dictionary form, e.g. "give up", "spill the beans"
+    definition: string | null; // Wiktionary gloss, if available
     surface: string;         // actual text spanned in the sentence (includes gap words if discontinuous)
     categories: ("idiom" | "phrasal_verb" | "proverb")[];
     has_slot: boolean;       // pattern has a wildcard slot (e.g. "spill someone's beans")
@@ -81,6 +82,24 @@ curl -X POST http://localhost:3000/parse \
 ### `GET /health`
 
 Returns `ok`.
+
+## Rebuilding the lexicon
+
+`dic/lexicon.jsonl` is pre-built and committed. Rebuild only if you update the Wiktionary dump or `builder_config.toml`.
+
+### 1. Download the Wiktionary dump
+
+```bash
+./download_dict.sh
+```
+
+Saves the decompressed dump to `tmp/raw-wiktextract-data.jsonl`.
+
+### 2. Build the lexicon
+
+```bash
+cargo run --release --bin builder
+```
 
 ## Testing
 

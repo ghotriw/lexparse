@@ -20,6 +20,8 @@ use tracing::info;
 #[derive(Deserialize, Debug)]
 struct BuilderConfig {
     input_file: String,
+    #[serde(default)]
+    lang_code: Option<String>,
     target_categories: std::collections::HashMap<String, String>,
 }
 
@@ -34,6 +36,7 @@ struct WikiSense {
 struct WikiEntry {
     word: Option<String>,
     pos: Option<String>,
+    lang_code: Option<String>,
     categories: Option<Vec<String>>,
     senses: Option<Vec<WikiSense>>,
 }
@@ -125,6 +128,11 @@ fn main() -> Result<()> {
         let Ok(entry) = serde_json::from_str::<WikiEntry>(&line) else {
             continue;
         };
+        if let Some(ref required) = config.lang_code {
+            if entry.lang_code.as_deref() != Some(required.as_str()) {
+                continue;
+            }
+        }
         let Some(word) = entry.word else { continue };
         if word.trim().split_whitespace().count() < 2 {
             continue;
