@@ -6,7 +6,7 @@
 //! token becomes a fixed `Word(lemma)`.
 
 use anyhow::Result;
-use lexparse::matcher::{self, Element};
+use lexparse::matcher::{self, Element, SlotType};
 use lexparse::mwe::LexiconEntry;
 use lexparse::{normalize, LEXICON_PATH};
 use serde::Deserialize;
@@ -83,8 +83,23 @@ fn is_closed_class(tok: &str) -> bool {
 fn has_content_word(elements: &[Element]) -> bool {
     elements.iter().any(|e| match e {
         Element::Word(w) => !is_closed_class(w),
-        Element::Slot => false,
+        Element::Slot(_) => false,
     })
+}
+
+/// Classify a slot placeholder token into a `SlotType`.
+fn slot_type_for(tok: &str) -> SlotType {
+    match tok.trim().to_lowercase().as_str() {
+        // Possessive/reflexive/personal pronoun placeholders.
+        "one's" | "ones" | "one" | "oneself"
+        | "someone's" | "somebody's" | "sb's" | "poss"
+        | "your" | "yours" | "yourself" | "pron"
+        | "someone" | "somebody" | "sb" => SlotType::Pron,
+        // Nominal (thing/place) placeholders.
+        "something" | "sth" | "sth's" | "sw" => SlotType::Noun,
+        // Generic wildcards.
+        _ => SlotType::Any,
+    }
 }
 
 /// Convert a headword string into a slot/gap element pattern.
@@ -95,25 +110,29 @@ fn phrase_to_elements(phrase: &str) -> Vec<Element> {
             continue;
         }
         if normalize::is_slot_token(&tok) {
-            raw.push(Element::Slot);
+            raw.push(Element::Slot(slot_type_for(&tok)));
         } else {
             raw.push(Element::Word(normalize::lemma(&tok)));
         }
     }
 
     // Drop connector words trapped between two slots, then collapse runs of
-    // adjacent slots into one.
+    // adjacent slots into one (downgrade to Any when types differ).
     let mut out: Vec<Element> = Vec::new();
     for (i, el) in raw.iter().enumerate() {
         if let Element::Word(w) = el {
-            let prev_slot = matches!(raw.get(i.wrapping_sub(1)), Some(Element::Slot));
-            let next_slot = matches!(raw.get(i + 1), Some(Element::Slot));
+            let prev_slot = matches!(raw.get(i.wrapping_sub(1)), Some(Element::Slot(_)));
+            let next_slot = matches!(raw.get(i + 1), Some(Element::Slot(_)));
             if prev_slot && next_slot && is_connector(w) {
                 continue;
             }
         }
-        if matches!(el, Element::Slot) && matches!(out.last(), Some(Element::Slot)) {
-            continue;
+        if matches!(el, Element::Slot(_)) {
+            if let Some(Element::Slot(existing)) = out.last_mut() {
+                // Two consecutive slots: downgrade to unconstrained.
+                *existing = SlotType::Any;
+                continue;
+            }
         }
         out.push(el.clone());
     }
@@ -273,12 +292,12 @@ mod tests {
 
     #[test]
     fn possessive_placeholder_becomes_slot() {
-        // "lose one's mind" -> lose <slot> mind  ("'s" clitic dropped)
+        // "lose one's mind" -> lose <slot:pron> mind  ("'s" clitic dropped)
         assert_eq!(
             pat("lose one's mind"),
             vec![
                 Element::Word("lose".into()),
-                Element::Slot,
+                Element::Slot(SlotType::Pron),
                 Element::Word("mind".into()),
             ]
         );
@@ -286,13 +305,13 @@ mod tests {
 
     #[test]
     fn connector_between_slots_collapsed() {
-        // "someone or something" collapses to a single slot
+        // "someone or something": Pron + Noun → collapses to Slot(Any)
         let p = pat("give someone or something away");
         assert_eq!(
             p,
             vec![
                 Element::Word("give".into()),
-                Element::Slot,
+                Element::Slot(SlotType::Any),
                 Element::Word("away".into()),
             ]
         );

@@ -132,6 +132,7 @@ pub fn detect(
     is_verb: &[bool],
     heads: &[usize],
     rels: &[String],
+    upos: &[String],
     lexicon: &MweLexicon,
 ) -> Vec<MweMatch> {
     let lemmas = matcher::lemmatize_pos(words, is_verb);
@@ -149,7 +150,7 @@ pub fn detect(
     let mut cands = Vec::new();
     for &entry_idx in &candidate_entries {
         let entry = &lexicon.entries[entry_idx];
-        let Some(idxs) = matcher::match_entry(&lemmas, &entry.elements) else {
+        let Some(idxs) = matcher::match_entry(&lemmas, upos, &entry.elements) else {
             continue;
         };
 
@@ -177,7 +178,7 @@ pub fn detect(
             phrase: entry.phrase.clone(),
             definition: entry.definition.clone(),
             categories: entry.categories.clone(),
-            has_slot: entry.elements.iter().any(|e| matches!(e, Element::Slot)),
+            has_slot: entry.elements.iter().any(|e| matches!(e, Element::Slot(_))),
             token_ids: idxs.iter().map(|&j| j + 1).collect(),
             words: idxs.iter().map(|&j| words[j].clone()).collect(),
             surface,

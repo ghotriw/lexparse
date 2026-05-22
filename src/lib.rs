@@ -296,7 +296,8 @@ pub fn run_inference(
     let is_verb: Vec<bool> = (0..n).map(|k| upos_str(k + 1) == "VERB").collect();
 
     let word_rels: Vec<String> = tokens.iter().map(|t| t.rel.clone()).collect();
-    let mwes = mwe::detect(&words, &is_verb, &heads, &word_rels, &state.lexicon);
+    let word_upos: Vec<String> = tokens.iter().map(|t| t.upos.clone()).collect();
+    let mwes = mwe::detect(&words, &is_verb, &heads, &word_rels, &word_upos, &state.lexicon);
 
     info!(
         words = n,

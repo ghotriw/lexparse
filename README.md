@@ -85,7 +85,14 @@ Returns `ok`.
 
 ## Rebuilding the lexicon
 
-`dic/lexicon.jsonl` is pre-built and committed. Rebuild only if you update the Wiktionary dump or `builder_config.toml`.
+`dic/lexicon.jsonl` is a generated artifact. Rebuild when you update the Wiktionary dump or `builder_config.toml`.
+
+**`builder_config.toml`** controls:
+- `phrase_blocklist` — phrases to exclude regardless of category (too generic, rare, or replaced by a corrected entry in `dic/custom.jsonl`)
+- `target_categories` — Wiktionary category → internal type mapping
+- `pos_filter` — POS allowlist per type
+
+**`dic/custom.jsonl`** — hand-curated additions and corrections loaded at runtime alongside the generated lexicon (same `LexiconEntry` JSONL format). Supports typed slots: `["slot:pron"]` (first fill token must be UPOS=PRON), `["slot:noun"]` (NOUN/PROPN/PRON/DET), `["slot"]` (unconstrained).
 
 ### 1. Download the Wiktionary dump
 
