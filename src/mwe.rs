@@ -68,12 +68,12 @@ impl MweLexicon {
 pub struct MweMatch {
     pub id: u32,
     pub pos: Option<String>,
-    pub surface: String,
+    pub phrase: String,
     pub categories: Vec<String>,
     pub has_slot: bool,
     pub token_ids: Vec<usize>,
     pub words: Vec<String>,
-    pub span_text: String,
+    pub surface: String,
     pub discontinuous: bool,
 }
 
@@ -129,7 +129,7 @@ pub fn detect(
         let lo = *idxs.first().unwrap();
         let hi = *idxs.last().unwrap();
         let discontinuous = hi - lo + 1 != idxs.len();
-        let span_text = (lo..=hi)
+        let surface = (lo..=hi)
             .map(|j| words[j].clone())
             .collect::<Vec<_>>()
             .join(" ")
@@ -143,12 +143,12 @@ pub fn detect(
         cands.push(MweMatch {
             id: entry.id,
             pos: entry.pos.clone(),
-            surface: entry.phrase.clone(),
+            phrase: entry.phrase.clone(),
             categories: entry.categories.clone(),
             has_slot: entry.elements.iter().any(|e| matches!(e, Element::Slot)),
             token_ids: idxs.iter().map(|&j| j + 1).collect(),
             words: idxs.iter().map(|&j| words[j].clone()).collect(),
-            span_text,
+            surface,
             discontinuous,
         });
     }

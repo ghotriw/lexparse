@@ -404,8 +404,8 @@ mod e2e {
     }
 
     // MWE detection golden cases.
-    // Each tuple: (sentence, exact lexicon surface as returned by the model, expect_mwe).
-    // surface is the winning entry after overlap resolution — run with --nocapture to see
+    // Each tuple: (sentence, exact lexicon phrase as returned by the model, expect_mwe).
+    // phrase is the winning entry after overlap resolution — run with --nocapture to see
     // what the model actually returns if a case starts failing.
     const MWE_CASES: &[(&str, &str)] = &[
         ("You have an audition today? Break a leg!", "break a leg"),
@@ -421,16 +421,16 @@ mod e2e {
         state
             .session
             .with_session(|session| {
-                for &(sent, surface) in MWE_CASES {
+                for &(sent, phrase) in MWE_CASES {
                     let result = run_inference(session, &state, sent)
                         .unwrap_or_else(|e| panic!("inference failed for {:?}: {}", sent, e));
 
-                    let hit = result.mwes.iter().find(|m| m.surface == surface);
+                    let hit = result.mwes.iter().find(|m| m.phrase == phrase);
 
                     if hit.is_none() {
                         panic!(
                             "expected MWE {:?} in {:?} but it was not detected",
-                            surface, sent
+                            phrase, sent
                         );
                     }
                 }
@@ -450,12 +450,12 @@ mod e2e {
                 let result = run_inference(session, &state, sent).unwrap();
                 println!("Detected MWEs for user sentence:");
                 for m in &result.mwes {
-                    println!("  surface: {:?}, words: {:?}", m.surface, m.words);
+                    println!("  phrase: {:?}, words: {:?}", m.phrase, m.words);
                 }
                 // A single-word match (one fixed lemma) must never surface —
                 // the lexicon drops entries with < 2 fixed words.
                 for m in &result.mwes {
-                    assert!(m.token_ids.len() >= 2, "single-token MWE: {:?}", m.surface);
+                    assert!(m.token_ids.len() >= 2, "single-token MWE: {:?}", m.phrase);
                 }
                 Ok(())
             })

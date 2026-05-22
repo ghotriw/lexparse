@@ -1,6 +1,6 @@
 # lexparse
 
-Lightweight English NLP microservice: dependency parsing, POS tagging, and MWE (Multi-Word Expression) detection via Subgraph Isomorphism.
+Lightweight English NLP microservice: dependency parsing, POS tagging, and MWE (Multi-Word Expression) detection via slot/gap matching.
 
 Built with Rust + ONNX Runtime.
 
@@ -56,23 +56,24 @@ curl -X POST http://localhost:3000/parse \
 ```ts
 {
   tokens: {
-    id: number;
-    word: string;
-    lemma: string;
-    upos: string;
-    head: number;
-    rel: string
+    id: number;      // 1-based index in the sentence
+    word: string;    // original surface form
+    lemma: string;   // base form used for matching
+    upos: string;    // Universal POS tag (VERB, NOUN, ADJ, …)
+    head: number;    // syntactic head id; 0 = ROOT
+    rel: string      // UD dependency relation (nsubj, obj, …)
   }[];
 
   mwes: {
-    surface: string;
-    category: "idiom" | "phrasal_verb" | "collocation_phrase" | "proverb_saying";
-    has_slot: boolean;
-    token_ids: number[];
-    words: string[];
-    span_text: string;
-    discontinuous: boolean;
-    tree_connected: boolean
+    id: number;              // lexicon entry id
+    pos: string | null;      // syntactic category of the whole MWE ("verb", "noun", …)
+    phrase: string;          // canonical dictionary form, e.g. "give up", "spill the beans"
+    surface: string;         // actual text spanned in the sentence (includes gap words if discontinuous)
+    categories: ("idiom" | "phrasal_verb" | "proverb")[];
+    has_slot: boolean;       // pattern has a wildcard slot (e.g. "spill someone's beans")
+    token_ids: number[];     // 1-based ids of matched tokens (gap words excluded)
+    words: string[];         // surface forms of matched tokens (parallel to token_ids)
+    discontinuous: boolean   // matched tokens are not contiguous in the sentence
   }[];
 }
 ```
