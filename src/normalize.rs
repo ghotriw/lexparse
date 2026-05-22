@@ -103,10 +103,13 @@ fn slot_re() -> &'static Regex {
 }
 
 /// Lexicon slot placeholder words (`normalize._SLOT_WORDS`).
+/// `"so"` is intentionally omitted: it is a learner-dictionary abbreviation for
+/// "someone" that Wiktionary headwords never use, so it only ever mis-slotted
+/// the genuine adverb "so" ("so far so good", "so long as", "so to speak").
 #[allow(dead_code)] // spec-port: only used offline by build_lexicon
 const SLOT_WORDS: &[&str] = &[
     "one's", "ones", "one", "oneself", "someone", "someone's", "somebody",
-    "somebody's", "something", "sb", "sb's", "sth", "sth's", "so", "sw",
+    "somebody's", "something", "sb", "sb's", "sth", "sth's", "sw",
     "your", "yours", "yourself", "pron", "poss", "x", "y", "z",
 ];
 

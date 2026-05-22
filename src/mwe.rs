@@ -150,7 +150,7 @@ pub fn detect(
     let mut cands = Vec::new();
     for &entry_idx in &candidate_entries {
         let entry = &lexicon.entries[entry_idx];
-        let Some(idxs) = matcher::match_entry(&lemmas, upos, &entry.elements) else {
+        let Some(idxs) = matcher::match_entry(&lemmas, upos, words, &entry.elements) else {
             continue;
         };
 

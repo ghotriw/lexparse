@@ -15,6 +15,26 @@ phrase_blocklist = [
   "so to say",       # leading slot makes `so` optional; corrected in custom.jsonl
   "as one man",      # slot too wide; corrected in custom.jsonl
   "in one voice",    # slot too wide; corrected in custom.jsonl
+  "the house",       # glossed "ellipsis of the house down"; fires on any literal "the house"
+  "have it",         # grammatically trivial
+  "do it",           # grammatically trivial
+  "make it",         # grammatically trivial
+  "I do",            # grammatically trivial
+  "I know",          # grammatically trivial
+  "is all",          # grammatically trivial
+  "and that",        # grammatically trivial
+  "of his",          # grammatically trivial
+  "had best",        # grammatically trivial
+  "make something of oneself", # slot too wide; fires on any "made X of"
+  "make something of", # slot too wide; fires on any "made X of"
+  "this is someone", # slot too wide
+  "be on nights",    # fires on any "been on the night"
+  "going to",        # pure grammatical construction
+  "want to",         # pure grammatical construction
+  "ought to",        # pure grammatical construction
+  "have got",        # pure grammatical construction
+  "liked to",        # pure grammatical construction
+  "there be",        # pure grammatical construction
 ]
 
 # Mapping of Wiktionary categories to internal parser category names

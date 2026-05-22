@@ -76,10 +76,16 @@ pub fn lemmatize_pos(tokens: &[String], is_verb: &[bool]) -> Vec<String> {
         .collect()
 }
 
+/// Inflectional endings the conservative `lemma` may leave behind. The residual
+/// of a prefix-tolerant match must be one of these — otherwise `thin` would
+/// spuriously prefix-match `thing` (residual `g` is not inflectional).
+const INFLECTION_SUFFIXES: &[&str] = &["s", "es", "ed", "d", "ing", "n", "en", "ies", "ied"];
+
 /// Prefix-tolerant lemma equality. Absorbs the residual inflection the
 /// deliberately-conservative `lemma` leaves, symmetrically. The 4-char floor
 /// keeps short function words (`the`/`but`/`and`) exact — at 3 chars `the`
-/// would spuriously prefix-match `then`, `there`, `they`.
+/// would spuriously prefix-match `then`, `there`, `they`. The residual must be
+/// a recognized inflectional suffix, so `thin`/`thing` does not match.
 fn eq(a: &str, b: &str) -> bool {
     if a == b {
         return true;
@@ -92,7 +98,10 @@ fn eq(a: &str, b: &str) -> bool {
     } else {
         (b, a)
     };
-    short.chars().count() >= 4 && long.starts_with(short)
+    if short.chars().count() < 4 || !long.starts_with(short) {
+        return false;
+    }
+    INFLECTION_SUFFIXES.contains(&&long[short.len()..])
 }
 
 /// `elements` -> (fixed_lemmas, gap_limits, slot_types).
@@ -140,6 +149,31 @@ pub fn first_fixed(elements: &[Element]) -> Option<&str> {
     })
 }
 
+/// Hard sentence/clause terminators no MWE span may cross — in a plain gap or
+/// an explicit slot alike. Hyphens and other intra-word punctuation are
+/// deliberately excluded: the tokenizer splits `twenty-one` and lexicon phrases
+/// may legitimately span such tokens.
+fn is_hard_boundary(s: &str) -> bool {
+    matches!(
+        s,
+        ";" | ":"
+            | "."
+            | "!"
+            | "?"
+            | "…"
+            | "\""
+            | "'"
+            | "\u{2019}"
+            | "\u{201c}"
+            | "\u{201d}"
+            | "\u{2018}"
+            | "--"
+            | "—"
+            | "("
+            | ")"
+    ) || (s.len() > 1 && s.chars().all(|c| c == '.'))
+}
+
 /// Returns true if the slot constraint is satisfied by the fill span `fill_start..fill_end`
 /// (token indices into `upos`).
 fn slot_fill_ok(slot_type: &SlotType, fill_start: usize, fill_end: usize, upos: &[String]) -> bool {
@@ -165,7 +199,12 @@ fn slot_fill_ok(slot_type: &SlotType, fill_start: usize, fill_end: usize, upos: 
 /// tokens. `upos` must be parallel to `lem` (UPOS tag per token).
 /// Returns the fixed-content token indices (ascending, possibly non-contiguous),
 /// or `None`. "Minimal span" = smallest (last-first); ties broken leftmost.
-pub fn match_entry(lem: &[String], upos: &[String], elements: &[Element]) -> Option<Vec<usize>> {
+pub fn match_entry(
+    lem: &[String],
+    upos: &[String],
+    surface: &[String],
+    elements: &[Element],
+) -> Option<Vec<usize>> {
     let (fixed, gaps, slot_types) = plan(elements);
     if fixed.is_empty() {
         return None;
@@ -193,6 +232,40 @@ pub fn match_entry(lem: &[String], upos: &[String], elements: &[Element]) -> Opt
                     break;
                 }
                 if eq(&lem[q], &fixed[k]) {
+                    let is_punct = |t: usize| {
+                        upos.get(t).map(String::as_str) == Some("PUNCT")
+                    };
+                    // No MWE span may cross a hard sentence/clause terminator.
+                    if (p + 1..q).any(|t| {
+                        is_punct(t) && surface.get(t).is_some_and(|s| is_hard_boundary(s))
+                    }) {
+                        continue;
+                    }
+                    // An implicit gap (no explicit slot) must not absorb a
+                    // content word. ADJ is allowed: it legitimately
+                    // pre-modifies the MWE's own noun ("on the concrete
+                    // floor").
+                    if gaps[k] <= GAP_MAX
+                        && (p + 1..q).any(|t| {
+                            matches!(
+                                upos.get(t).map(String::as_str),
+                                Some("NOUN" | "PROPN" | "NUM" | "VERB")
+                            )
+                        })
+                    {
+                        continue;
+                    }
+                    // A comma between only two fixed words signals they are not
+                    // really together ("fair, playing"). Longer idioms may
+                    // legitimately contain one ("so far, so good").
+                    if gaps[k] <= GAP_MAX
+                        && fixed.len() < 3
+                        && (p + 1..q).any(|t| {
+                            is_punct(t) && surface.get(t).map(String::as_str) == Some(",")
+                        })
+                    {
+                        continue;
+                    }
                     // For slot gaps, validate UPOS of the fill's first token.
                     if gaps[k] > GAP_MAX
                         && !slot_fill_ok(&slot_types[k], p + 1, q, upos)
@@ -246,7 +319,7 @@ mod tests {
     fn matches_contiguous() {
         let elems = [w("spill"), w("the"), w("bean")];
         let sent = lems("he spill the bean today");
-        let idx = match_entry(&sent, &no_upos(sent.len()), &elems).unwrap();
+        let idx = match_entry(&sent, &no_upos(sent.len()), &sent, &elems).unwrap();
         assert_eq!(idx, vec![1, 2, 3]);
     }
 
@@ -256,7 +329,7 @@ mod tests {
         let elems = [w("make"), slot(), w("up"), w("mind")];
         let sent = lems("they make her up mind now");
         let u = upos("X VERB PRON X NOUN X");
-        let idx = match_entry(&sent, &u, &elems).unwrap();
+        let idx = match_entry(&sent, &u, &sent, &elems).unwrap();
         assert_eq!(idx, vec![1, 3, 4]);
     }
 
@@ -264,7 +337,7 @@ mod tests {
     fn no_match_when_gap_too_wide() {
         let elems = [w("kick"), w("bucket")];
         let sent = lems("kick a big old bucket");
-        assert!(match_entry(&sent, &no_upos(sent.len()), &elems).is_none());
+        assert!(match_entry(&sent, &no_upos(sent.len()), &sent, &elems).is_none());
     }
 
     #[test]
@@ -272,7 +345,7 @@ mod tests {
         let elems = [w("kick"), slot(), w("bucket")];
         let sent = lems("kick a big old bucket");
         let u = upos("VERB DET ADJ ADJ NOUN");
-        let idx = match_entry(&sent, &u, &elems).unwrap();
+        let idx = match_entry(&sent, &u, &sent, &elems).unwrap();
         assert_eq!(idx, vec![0, 4]);
     }
 
@@ -280,11 +353,95 @@ mod tests {
     fn prefix_tolerant_eq() {
         let elems = [w("over"), w("moon")];
         let sent = lems("over moons");
-        assert!(match_entry(&sent, &no_upos(sent.len()), &elems).is_some());
+        assert!(match_entry(&sent, &no_upos(sent.len()), &sent, &elems).is_some());
         assert!(eq("moon", "moons"));
         assert!(!eq("go", "gone"));
         assert!(!eq("the", "then"));
         assert!(!eq("but", "butter"));
+    }
+
+    #[test]
+    fn eq_rejects_noninflectional_residual() {
+        // "thin" is a 4-char prefix of "thing" but the residual "g" is not
+        // an inflectional ending.
+        assert!(!eq("thin", "thing"));
+        assert!(eq("alway", "always"));
+        assert!(!eq("wall", "wallaby"));
+    }
+
+    #[test]
+    fn no_match_implicit_gap_across_period() {
+        // A plain gap must not cross a sentence-final period.
+        let elems = [w("fair"), w("play")];
+        let sent = lems("fair . play");
+        let u = upos("ADJ PUNCT VERB");
+        assert!(match_entry(&sent, &u, &sent, &elems).is_none());
+    }
+
+    #[test]
+    fn implicit_gap_allows_comma_for_long_idiom() {
+        // "so far, so good" (4 fixed words) — the interior comma is part of it.
+        let elems = [w("so"), w("far"), w("so"), w("good")];
+        let sent = lems("so far , so good");
+        let u = upos("ADV ADV PUNCT ADV ADJ");
+        assert!(match_entry(&sent, &u, &sent, &elems).is_some());
+    }
+
+    #[test]
+    fn implicit_gap_rejects_comma_for_two_word_entry() {
+        // "fair play" (2 fixed words) — a comma between them means they are
+        // not actually the collocation.
+        let elems = [w("fair"), w("play")];
+        let sent = lems("fair , play");
+        let u = upos("ADJ PUNCT VERB");
+        assert!(match_entry(&sent, &u, &sent, &elems).is_none());
+    }
+
+    #[test]
+    fn matches_across_hyphen_gap() {
+        // A hyphen is PUNCT but not a clause boundary — still crossable.
+        let elems = [w("over"), w("board")];
+        let sent = lems("over - board");
+        let u = upos("ADP PUNCT NOUN");
+        assert!(match_entry(&sent, &u, &sent, &elems).is_some());
+    }
+
+    #[test]
+    fn slot_may_span_comma() {
+        // "so far, so good" — the lexicon slot deliberately spans the comma.
+        let elems = [slot(), w("far"), slot(), w("good")];
+        let sent = lems("so far , so good");
+        let u = upos("ADV ADV PUNCT ADV ADJ");
+        assert!(match_entry(&sent, &u, &sent, &elems).is_some());
+    }
+
+    #[test]
+    fn no_match_across_hard_boundary() {
+        // A slot must NOT span a sentence-final period.
+        let elems = [slot(), w("far"), slot(), w("good")];
+        let sent = lems("so far . so good");
+        let u = upos("ADV ADV PUNCT ADV ADJ");
+        assert!(match_entry(&sent, &u, &sent, &elems).is_none());
+    }
+
+    #[test]
+    fn implicit_gap_rejects_content_word() {
+        // "about time" must not match across the numeral "four".
+        let elems = [w("about"), w("time")];
+        let sent = lems("about four time");
+        let u = upos("ADP NUM NOUN");
+        assert!(match_entry(&sent, &u, &sent, &elems).is_none());
+    }
+
+    #[test]
+    fn implicit_gap_allows_pron_and_adv() {
+        // Separable phrasal verbs: pronoun object / adverb modifier in the gap.
+        let elems = [w("wake"), w("up")];
+        let sent = lems("wake you up");
+        assert!(match_entry(&sent, &upos("VERB PRON ADP"), &sent, &elems).is_some());
+        let sent2 = lems("look quickly around");
+        let elems2 = [w("look"), w("around")];
+        assert!(match_entry(&sent2, &upos("VERB ADV ADV"), &sent2, &elems2).is_some());
     }
 
     #[test]
@@ -293,7 +450,7 @@ mod tests {
         let elems = [w("pull"), slot_pron(), w("together")];
         let sent = lems("pull herself together");
         let u = upos("VERB PRON ADV");
-        assert!(match_entry(&sent, &u, &elems).is_some());
+        assert!(match_entry(&sent, &u, &sent, &elems).is_some());
     }
 
     #[test]
@@ -302,7 +459,7 @@ mod tests {
         let elems = [w("pull"), slot_pron(), w("together")];
         let sent = lems("pull a team together");
         let u = upos("VERB DET NOUN ADV");
-        assert!(match_entry(&sent, &u, &elems).is_none());
+        assert!(match_entry(&sent, &u, &sent, &elems).is_none());
     }
 
     #[test]
@@ -311,7 +468,7 @@ mod tests {
         let elems = [w("pull"), slot_pron(), w("together")];
         let sent = lems("pull young volunteer together");
         let u = upos("VERB ADJ NOUN ADV");
-        assert!(match_entry(&sent, &u, &elems).is_none());
+        assert!(match_entry(&sent, &u, &sent, &elems).is_none());
     }
 
     #[test]
@@ -320,6 +477,6 @@ mod tests {
         let elems = [w("pull"), slot_pron(), w("together")];
         let sent = lems("pull together");
         let u = upos("VERB ADV");
-        assert!(match_entry(&sent, &u, &elems).is_none());
+        assert!(match_entry(&sent, &u, &sent, &elems).is_none());
     }
 }
