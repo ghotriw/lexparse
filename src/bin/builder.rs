@@ -59,6 +59,30 @@ fn is_connector(tok: &str) -> bool {
     matches!(tok.to_lowercase().as_str(), "or" | "and" | "nor")
 }
 
+/// Articles, prepositions, and conjunctions that carry no content on their own.
+/// Verbs (do, have, be) are intentionally excluded — they anchor phrasal verbs.
+fn is_closed_class(tok: &str) -> bool {
+    matches!(
+        tok.to_lowercase().as_str(),
+        "a" | "an" | "the"
+            | "of" | "in" | "on" | "at" | "to" | "for" | "with" | "by" | "from"
+            | "up" | "out" | "off" | "over" | "under" | "into" | "onto" | "upon"
+            | "about" | "as" | "per" | "via" | "vs"
+            | "and" | "or" | "but" | "nor" | "so" | "yet" | "if" | "than"
+            | "not" | "no" | "its" | "it" | "be"
+    )
+}
+
+/// Returns true if the element list has at least one fixed word that is not
+/// a closed-class function word (article, preposition, conjunction).
+/// Prevents patterns like "of a" or "in the" from flooding match results.
+fn has_content_word(elements: &[Element]) -> bool {
+    elements.iter().any(|e| match e {
+        Element::Word(w) => !is_closed_class(w),
+        Element::Slot => false,
+    })
+}
+
 /// Convert a headword string into a slot/gap element pattern.
 fn phrase_to_elements(phrase: &str) -> Vec<Element> {
     let mut raw: Vec<Element> = Vec::new();
@@ -181,14 +205,22 @@ fn main() -> Result<()> {
             skipped_too_short += 1;
             continue;
         }
+        if !has_content_word(&elements) {
+            skipped_too_short += 1;
+            continue;
+        }
 
+        let mut categories: Vec<_> = matched_types.into_iter().collect();
+        categories.sort_unstable();
+        let mut tags: Vec<_> = tags.into_iter().collect();
+        tags.sort_unstable();
         let record = LexiconEntry {
             id: hash_string(&word),
             phrase: word,
-            categories: matched_types.into_iter().collect(),
+            categories,
             pos: entry.pos,
             definition: glosses.into_iter().next(),
-            tags: tags.into_iter().collect(),
+            tags,
             elements,
         };
         writeln!(out_file, "{}", serde_json::to_string(&record)?)?;

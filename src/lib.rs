@@ -412,6 +412,9 @@ mod e2e {
         ("He spilled the beans about the surprise party.", "spill the beans"),
         ("After years of hard work, she finally kicked the bucket.", "kick the bucket"),
         ("She was over the moon when she heard the news.", "over the moon"),
+        // prepositional particles (particle → noun → verb arc)
+        ("they just did not hold with such nonsense.", "hold with"),
+        ("she spent her time spying on the neighbours.", "spy on"),
     ];
 
     #[test]

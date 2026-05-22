@@ -83,19 +83,25 @@ fn is_phrasal_verb(entry: &LexiconEntry) -> bool {
 }
 
 /// Single dependency-arc gate for phrasal verbs: the verb token must be tagged
-/// VERB, and the following fixed token (the particle) must attach to the verb.
-/// This is a soft point-filter — it only rejects hits, it never finds them —
-/// and it discriminates the phrasal use ("look up the word", up→look) from the
-/// literal preposition ("look up the chimney", up→chimney).
+/// VERB, and the particle must be connected to the verb — either directly
+/// (particle → verb, typical for adverbial particles: "look up the word") or
+/// via one noun hop (particle → noun → verb, typical for prepositional particles
+/// in UD: "hold with such nonsense" → with→nonsense(case)→hold(obl)).
 fn phrasal_arc_ok(idxs: &[usize], is_verb: &[bool], heads: &[usize]) -> bool {
     let verb = idxs[0];
     if !is_verb.get(verb).copied().unwrap_or(false) {
         return false;
     }
-    match idxs.get(1) {
-        Some(&particle) => heads.get(particle + 1).copied() == Some(verb + 1),
-        None => true,
+    let Some(&particle) = idxs.get(1) else {
+        return true;
+    };
+    let particle_head = heads.get(particle + 1).copied().unwrap_or(0);
+    // Direct: particle → verb
+    if particle_head == verb + 1 {
+        return true;
     }
+    // Indirect via case marker: particle → noun → verb
+    particle_head > 0 && heads.get(particle_head).copied() == Some(verb + 1)
 }
 
 pub fn detect(
