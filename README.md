@@ -70,7 +70,7 @@ curl -X POST http://localhost:3000/parse \
     phrase: string;          // canonical dictionary form, e.g. "give up", "spill the beans"
     definition: string | null; // Wiktionary gloss, if available
     surface: string;         // actual text spanned in the sentence (includes gap words if discontinuous)
-    categories: ("idiom" | "phrasal_verb" | "proverb")[];
+    categories: ("idiom" | "phrasal_verb" | "proverb" | "fixed_collocation")[];
     has_slot: boolean;       // pattern has a wildcard slot (e.g. "spill someone's beans")
     token_ids: number[];     // 1-based ids of matched tokens (gap words excluded)
     words: string[];         // surface forms of matched tokens (parallel to token_ids)

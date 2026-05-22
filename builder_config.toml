@@ -9,3 +9,9 @@ lang_code = "en"
 "English idioms" = "idiom"
 "English phrasal verbs" = "phrasal_verb"
 "English proverbs" = "proverb"
+"English multiword terms" = "fixed_collocation"
+
+# Optional POS allowlist per output type.
+# Entries matched only by a filtered type are dropped if their POS is not listed.
+[pos_filter]
+fixed_collocation = ["verb", "phrase", "adv", "prep_phrase"]

@@ -23,6 +23,8 @@ struct BuilderConfig {
     #[serde(default)]
     lang_code: Option<String>,
     target_categories: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pos_filter: std::collections::HashMap<String, Vec<String>>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -193,6 +195,16 @@ fn main() -> Result<()> {
                     consider(cats, Some(sense));
                 }
             }
+        }
+
+        // Drop types whose POS filter doesn't match this entry's POS.
+        if !config.pos_filter.is_empty() {
+            let entry_pos = entry.pos.as_deref().unwrap_or("");
+            matched_types.retain(|t| {
+                config.pos_filter.get(t).map_or(true, |allowed| {
+                    allowed.iter().any(|p| p == entry_pos)
+                })
+            });
         }
 
         if matched_types.is_empty() || processed_words.contains(&word) {
