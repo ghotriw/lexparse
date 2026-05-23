@@ -27,6 +27,7 @@ pub const VOCAB_PATH: &str = "model/vocabs.json";
 
 pub const LEXICON_PATH: &str = "dic/lexicon.jsonl";
 pub const CUSTOM_LEXICON_PATH: &str = "dic/custom.jsonl";
+pub const CORRECTIONS_PATH: &str = "dic/corrections.jsonl";
 
 // --- types ---
 
@@ -391,7 +392,8 @@ mod e2e {
     fn build_state() -> anyhow::Result<AppState> {
         let vocab: Vocab =
             serde_json::from_str::<VocabRaw>(&std::fs::read_to_string(VOCAB_PATH)?)?.into();
-        let lexicon = mwe::MweLexicon::load_with_custom(LEXICON_PATH, CUSTOM_LEXICON_PATH)?;
+        let mut lexicon = mwe::MweLexicon::load_with_custom(LEXICON_PATH, CUSTOM_LEXICON_PATH)?;
+        lexicon.apply_corrections(CORRECTIONS_PATH)?;
 
         let tokenizer = Tokenizer::from_file("model/tokenizer.json")
             .map_err(|e| anyhow::anyhow!("tokenizer: {}", e))?;

@@ -44,6 +44,39 @@ impl MweLexicon {
         }
     }
 
+    /// Override `categories` on entries by id from a corrections jsonl.
+    /// Each line: `{"id": <u32>, "categories": ["..."]}`. Ids not in the
+    /// loaded lexicon are skipped silently. Used to patch source-data
+    /// mislabels (e.g. discourse markers wrongly tagged `idiom`).
+    pub fn apply_corrections(&mut self, path: &str) -> anyhow::Result<()> {
+        use std::io::BufRead;
+        if !std::path::Path::new(path).exists() {
+            return Ok(());
+        }
+        #[derive(serde::Deserialize)]
+        struct Patch {
+            id: u32,
+            categories: Vec<String>,
+        }
+        let mut by_id: HashMap<u32, Vec<String>> = HashMap::new();
+        let file = std::fs::File::open(path)?;
+        for line in std::io::BufReader::new(file).lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(p) = serde_json::from_str::<Patch>(&line) {
+                by_id.insert(p.id, p.categories);
+            }
+        }
+        for entry in &mut self.entries {
+            if let Some(cats) = by_id.get(&entry.id) {
+                entry.categories = cats.clone();
+            }
+        }
+        Ok(())
+    }
+
     fn load_paths(paths: &[&str]) -> anyhow::Result<Self> {
         use std::io::BufRead;
         let mut entries = Vec::new();

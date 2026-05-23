@@ -16,6 +16,10 @@ path = "src/main.rs"
 name = "builder"
 path = "src/bin/builder.rs"
 
+[[bin]]
+name = "correct_idioms"
+path = "src/bin/correct_idioms.rs"
+
 [dependencies]
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
@@ -32,3 +36,4 @@ regex = "1"
 tower-http = { version = "0.6", features = ["cors"] }
 dotenvy = "0.15"
 toml = "1.1.2"
+ureq = { version = "2", features = ["json"] }

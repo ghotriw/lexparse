@@ -133,7 +133,8 @@ async fn main() -> anyhow::Result<()> {
     let vocab: Vocab = serde_json::from_str::<VocabRaw>(&std::fs::read_to_string(VOCAB_PATH)?)?.into();
 
     info!("loading lexicon from {LEXICON_PATH} + {CUSTOM_LEXICON_PATH}");
-    let lexicon = lexparse::mwe::MweLexicon::load_with_custom(LEXICON_PATH, CUSTOM_LEXICON_PATH)?;
+    let mut lexicon = lexparse::mwe::MweLexicon::load_with_custom(LEXICON_PATH, CUSTOM_LEXICON_PATH)?;
+    lexicon.apply_corrections(lexparse::CORRECTIONS_PATH)?;
 
     info!("loading tokenizer");
     let tokenizer = tokenizers::Tokenizer::from_file("model/tokenizer.json")
