@@ -1,4 +1,4 @@
-use ndarray::{Array3, ArrayView3, ArrayView4};
+use ndarray::{Array3, Array4, ArrayView3, ArrayView4};
 use ort::ep::CPU;
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use serde::{Deserialize, Serialize};
@@ -42,6 +42,9 @@ pub struct ParsedToken {
     pub head: usize,
     pub rel: String,
     pub upos: String,
+    /// CoNLL-U FEATS field: `Cat=Val|Cat=Val…` (alphabetical), or `_` if none /
+    /// the model has no FEATS head.
+    pub feats: String,
 }
 
 #[derive(Serialize)]
@@ -65,15 +68,34 @@ pub fn vocab_from_map(map: std::collections::HashMap<String, usize>) -> Vec<Stri
     v
 }
 
+/// FEATS vocab `{ category: { value: idx } }` → ordered `[(category, [value_by_idx])]`.
+/// Categories are sorted alphabetically to match the model's s_feats category axis
+/// (training builds it via `for cat in sorted(cats)`); value index 0 is `_` (absent).
+pub fn feats_from_map(
+    map: std::collections::HashMap<String, std::collections::HashMap<String, usize>>,
+) -> Vec<(String, Vec<String>)> {
+    let mut cats: Vec<(String, Vec<String>)> = map
+        .into_iter()
+        .map(|(cat, values)| (cat, vocab_from_map(values)))
+        .collect();
+    cats.sort_by(|a, b| a.0.cmp(&b.0));
+    cats
+}
+
 #[derive(Deserialize)]
 pub struct VocabRaw {
     rel_vocab: std::collections::HashMap<String, usize>,
     pos_vocab: std::collections::HashMap<String, usize>,
+    // Present only for upos_feats models; empty map for UPOS-only checkpoints.
+    #[serde(default)]
+    feats_vocab: std::collections::HashMap<String, std::collections::HashMap<String, usize>>,
 }
 
 pub struct Vocab {
     pub rels: Vec<String>,
     pub upos: Vec<String>,
+    /// Ordered `[(category, [value_by_idx])]`; empty when the model has no FEATS head.
+    pub feats: Vec<(String, Vec<String>)>,
 }
 
 impl From<VocabRaw> for Vocab {
@@ -81,6 +103,7 @@ impl From<VocabRaw> for Vocab {
         Vocab {
             rels: vocab_from_map(raw.rel_vocab),
             upos: vocab_from_map(raw.pos_vocab),
+            feats: feats_from_map(raw.feats_vocab),
         }
     }
 }
@@ -140,6 +163,8 @@ pub struct AppState {
     pub tokenizer: Tokenizer,
     pub rels: Vec<String>,
     pub upos: Vec<String>,
+    /// FEATS categories, ordered to match the s_feats axis; empty if no FEATS head.
+    pub feats: Vec<(String, Vec<String>)>,
     pub lexicon: mwe::MweLexicon,
     pub job_tx: mpsc::UnboundedSender<SentenceJob>,
 }
@@ -252,6 +277,18 @@ pub fn run_inference(
     let pd = dims(pos_shape);
     let pos = ArrayView3::from_shape((pd[0], pd[1], pd[2]), pos_data)?;
 
+    // s_feats [1, W, C, Vmax] — present only for upos_feats models. Owned so the
+    // per-word closure below doesn't borrow `outputs`.
+    let feats_arr: Option<Array4<f32>> = if state.feats.is_empty() {
+        None
+    } else {
+        let (fs, fdat) = outputs["s_feats"]
+            .try_extract_tensor::<f32>()
+            .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+        let fd = dims(fs);
+        Some(ArrayView4::from_shape((fd[0], fd[1], fd[2], fd[3]), fdat)?.to_owned())
+    };
+
     // MST (Chu-Liu/Edmonds): edge u->v (u is head of v) has weight s_arc[v][u].
     let mut score = vec![vec![f32::NEG_INFINITY; w_dim]; w_dim];
     for v in 0..w_dim {
@@ -274,6 +311,23 @@ pub fn run_inference(
     let upos_str =
         |w: usize| state.upos.get(upos_ids[w]).cloned().unwrap_or_else(|| "X".into());
 
+    // CoNLL-U FEATS string for grid row `w`: per category, argmax over its own
+    // values; value index 0 is `_` (absent) and is skipped. Categories are already
+    // alphabetical (feats_from_map), matching CoNLL-U ordering. `_` when no feature.
+    let feats_str = |w: usize| -> String {
+        let Some(fa) = feats_arr.as_ref() else { return "_".into() };
+        let mut parts: Vec<String> = Vec::new();
+        for (c, (cat, values)) in state.feats.iter().enumerate() {
+            let best = argmax((0..values.len()).map(|k| fa[[0, w, c, k]]));
+            if best != 0 {
+                if let Some(val) = values.get(best) {
+                    parts.push(format!("{cat}={val}"));
+                }
+            }
+        }
+        if parts.is_empty() { "_".into() } else { parts.join("|") }
+    };
+
     let mut tokens = Vec::with_capacity(n);
     for i in 1..=n {
         let head = heads[i];
@@ -288,6 +342,7 @@ pub fn run_inference(
             head,
             rel,
             upos,
+            feats: feats_str(i),
         });
     }
 
@@ -403,6 +458,7 @@ mod e2e {
             tokenizer,
             rels: vocab.rels,
             upos: vocab.upos,
+            feats: vocab.feats,
             lexicon,
             job_tx,
         })
@@ -440,6 +496,41 @@ mod e2e {
                             "expected MWE {:?} in {:?} but it was not detected",
                             phrase, sent
                         );
+                    }
+                }
+                Ok(())
+            })
+            .expect("session error");
+    }
+
+    #[test]
+    #[ignore = "requires model artifacts; run with: cargo test -- --include-ignored"]
+    fn feats_output_smoke() {
+        let state = build_state().expect("failed to load model artifacts");
+        if state.feats.is_empty() {
+            eprintln!("model has no FEATS head — skipping");
+            return;
+        }
+        state
+            .session
+            .with_session(|session| {
+                let sent = "The dogs were running quickly through the muddy fields.";
+                let result = run_inference(session, &state, sent).unwrap();
+                println!("FEATS for {:?}:", sent);
+                for t in &result.tokens {
+                    println!("  {:>2} {:<10} {:<6} {}", t.id, t.word, t.upos, t.feats);
+                }
+                // at least one token must carry morphological features
+                assert!(
+                    result.tokens.iter().any(|t| t.feats != "_"),
+                    "no FEATS predicted for any token"
+                );
+                // FEATS string must be valid CoNLL-U: Cat=Val pairs joined by '|'
+                for t in &result.tokens {
+                    if t.feats != "_" {
+                        for kv in t.feats.split('|') {
+                            assert!(kv.contains('='), "malformed FEATS {:?}", t.feats);
+                        }
                     }
                 }
                 Ok(())

@@ -147,6 +147,7 @@ async fn main() -> anyhow::Result<()> {
         tokenizer,
         rels: vocab.rels,
         upos: vocab.upos,
+        feats: vocab.feats,
         lexicon,
         job_tx,
     });

@@ -1,6 +1,6 @@
 # lexparse
 
-Lightweight English NLP microservice: dependency parsing, POS tagging, and MWE (Multi-Word Expression) detection via slot/gap matching.
+Lightweight English NLP microservice: dependency parsing, POS tagging, morphological features (FEATS), and MWE (Multi-Word Expression) detection via slot/gap matching.
 
 Built with Rust + ONNX Runtime.
 
@@ -60,6 +60,7 @@ curl -X POST http://localhost:3000/parse \
     word: string;    // original surface form
     lemma: string;   // base form used for matching
     upos: string;    // Universal POS tag (VERB, NOUN, ADJ, …)
+    feats: string;   // CoNLL-U morphological features, e.g. "Number=Plur|Tense=Past"; "_" if none
     head: number;    // syntactic head id; 0 = ROOT
     rel: string      // UD dependency relation (nsubj, obj, …)
   }[];
@@ -78,6 +79,44 @@ curl -X POST http://localhost:3000/parse \
   }[];
 }
 ```
+
+### Morphological features (`feats`)
+
+Each token's `feats` is a [CoNLL-U FEATS](https://universaldependencies.org/format.html#morphological-annotation) string: `Category=Value` pairs joined by `|`, sorted alphabetically by category, or `_` when the token has no features. Examples:
+
+```
+were     →  Mood=Ind|Number=Plur|Person=3|Tense=Past|VerbForm=Fin
+dogs     →  Number=Plur
+quickly  →  _
+```
+
+Predicted per token by a multi-label head (one independent classifier per category). Categories present in the model (UD English EWT+GUM tagset):
+
+| Category | Values |
+| -------- | ------ |
+| `Number` | Sing, Plur, Ptan |
+| `Person` | 1, 2, 3 |
+| `Tense` | Past, Pres |
+| `VerbForm` | Fin, Inf, Part, Ger |
+| `Mood` | Ind, Imp, Sub |
+| `Voice` | Pass |
+| `Degree` | Pos, Cmp, Sup |
+| `Case` | Nom, Acc, Gen |
+| `Gender` | Masc, Fem, Neut, Fem,Masc |
+| `PronType` | Art, Dem, Prs, Int, Rel, Ind, Neg, Tot, Rcp, Emp |
+| `Definite` | Def, Ind |
+| `NumType` | Card, Ord, Mult, Frac |
+| `NumForm` | Word, Digit, Roman, Combi |
+| `Polarity` | Pos, Neg |
+| `Poss` | Yes |
+| `Reflex` | Yes |
+| `Abbr` | Yes |
+| `Foreign` | Yes |
+| `Typo` | Yes |
+| `Style` | Arch, Coll, Expr, Slng, Vrnc |
+| `ExtPos` | ADP, ADV, CCONJ, NOUN, PRON, PROPN, SCONJ |
+
+Only models trained with the FEATS head populate this field; UPOS-only checkpoints return `_` for every token. The exact category/value inventory is defined by `feats_vocab` in `model/vocabs.json`.
 
 ### `GET /health`
 
