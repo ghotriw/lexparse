@@ -18,9 +18,11 @@ use mwe::MweMatch;
 /// parser SubwordField fix_len: max subwords kept per word.
 /// This is an upper bound; actual tensor size shrinks to sentence max.
 const MAX_FIX_LEN: usize = 20;
-/// microsoft/deberta-v3-base sentencepiece ids (RUST_INTEGRATION.md §5.1).
-const CLS_ID: i64 = 1; // ROOT row / [CLS]
-const UNK_ID: i64 = 3; // word that produced no pieces
+/// Encoder special-token ids — MUST match the tokenizer.json in the bundle.
+/// ModernBERT-base: [CLS]=50281, [UNK]=50280.
+/// (DeBERTa-v3 was [CLS]=1, [UNK]=3 — one bundle = one encoder.)
+const CLS_ID: i64 = 50281; // ROOT row / [CLS]
+const UNK_ID: i64 = 50280; // word that produced no pieces
 
 pub const MODEL_PATH: &str = "model/model.onnx";
 pub const VOCAB_PATH: &str = "model/vocabs.json";

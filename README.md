@@ -102,7 +102,7 @@ Predicted per token by a multi-label head (one independent classifier per catego
 | `Voice` | Pass |
 | `Degree` | Pos, Cmp, Sup |
 | `Case` | Nom, Acc, Gen |
-| `Gender` | Masc, Fem, Neut, Fem,Masc |
+| `Gender` | Masc, Fem, Neut, `Fem,Masc` (composite = both) |
 | `PronType` | Art, Dem, Prs, Int, Rel, Ind, Neg, Tot, Rcp, Emp |
 | `Definite` | Def, Ind |
 | `NumType` | Card, Ord, Mult, Frac |
