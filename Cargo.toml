@@ -20,6 +20,10 @@ path = "src/bin/builder.rs"
 name = "correct_idioms"
 path = "src/bin/correct_idioms.rs"
 
+[[bin]]
+name = "eval_wiktextract"
+path = "src/bin/eval_wiktextract.rs"
+
 [dependencies]
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }

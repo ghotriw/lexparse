@@ -147,14 +147,16 @@ fn phrasal_arc_ok(idxs: &[usize], is_verb: &[bool], heads: &[usize], rels: &[Str
         return true;
     };
     let particle_head = heads.get(particle + 1).copied().unwrap_or(0);
+    let particle_rel = rels.get(particle).map(String::as_str).unwrap_or("");
     // Direct: particle → verb
     if particle_head == verb + 1 {
-        return true;
+        // Must be explicitly tagged as compound:prt or advmod.
+        // UD often uses advmod for directional phrasal verbs (e.g., "come out", "run off").
+        return particle_rel == "compound:prt" || particle_rel == "advmod";
     }
     // Indirect via case marker: particle → noun → verb.
     // Exclude `mark` (infinitival `to`) — it attaches to the complement verb,
     // not to the governing verb, and is not a phrasal-verb particle.
-    let particle_rel = rels.get(particle).map(String::as_str).unwrap_or("");
     particle_head > 0
         && heads.get(particle_head).copied() == Some(verb + 1)
         && particle_rel != "mark"
