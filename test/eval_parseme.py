@@ -91,6 +91,9 @@ def evaluate(sentences, lexicon_phrases):
     true_positives = 0
 
     report_lines = []
+    tp_report_lines = []
+    fp_report_lines = []
+    fn_report_lines = []
 
     # We batch requests to speed things up
     batch_size = 50
@@ -151,13 +154,31 @@ def evaluate(sentences, lexicon_phrases):
                         # Append to report if there's any activity
                         if tp_list or fp_list or fn_list:
                             report_lines.append(f"Sentence: {sent_text}")
+                            
+                            if tp_list:
+                                tp_report_lines.append(f"Sentence: {sent_text}")
+                            if fp_list:
+                                fp_report_lines.append(f"Sentence: {sent_text}")
+                            if fn_list:
+                                fn_report_lines.append(f"Sentence: {sent_text}")
+                                
                             for p, e in tp_list:
-                                report_lines.append(f"  [+] TRUE POSITIVE: '{p['surface']}' (lemmas: {e['lemma_phrase']})")
+                                line = f"  [+] TRUE POSITIVE: '{p['surface']}' (lemmas: {e['lemma_phrase']})"
+                                report_lines.append(line)
+                                tp_report_lines.append(line)
                             for p in fp_list:
-                                report_lines.append(f"  [-] FALSE POSITIVE: '{p['surface']}' (lexicon phrase: {p.get('phrase', '')})")
+                                line = f"  [-] FALSE POSITIVE: '{p['surface']}' (lexicon phrase: {p.get('phrase', '')})"
+                                report_lines.append(line)
+                                fp_report_lines.append(line)
                             for e in fn_list:
-                                report_lines.append(f"  [!] FALSE NEGATIVE (Missed): '{e['lemma_phrase']}' (tokens: {sorted(list(e['token_ids']))})")
+                                line = f"  [!] FALSE NEGATIVE (Missed): '{e['lemma_phrase']}' (tokens: {sorted(list(e['token_ids']))})"
+                                report_lines.append(line)
+                                fn_report_lines.append(line)
+                                
                             report_lines.append("")
+                            if tp_list: tp_report_lines.append("")
+                            if fp_list: fp_report_lines.append("")
+                            if fn_list: fn_report_lines.append("")
 
             sys.stdout.write(f"\rProcessed {min(i+batch_size, len(sentences))}/{len(sentences)}")
             sys.stdout.flush()
@@ -182,11 +203,27 @@ def evaluate(sentences, lexicon_phrases):
     )
     print("\n" + metrics_text)
 
-    report_path = "evaluation_report.txt"
-    with open(report_path, "w") as f:
+    with open("evaluation_report.txt", "w") as f:
         f.write(metrics_text)
         f.write("\n".join(report_lines))
-    print(f"Detailed report written to: {report_path}")
+        
+    with open("report_true_positives.txt", "w") as f:
+        f.write(metrics_text)
+        f.write("\n".join(tp_report_lines))
+        
+    with open("report_false_positives.txt", "w") as f:
+        f.write(metrics_text)
+        f.write("\n".join(fp_report_lines))
+        
+    with open("report_false_negatives.txt", "w") as f:
+        f.write(metrics_text)
+        f.write("\n".join(fn_report_lines))
+        
+    print("Reports written to:")
+    print(" - evaluation_report.txt (All combined)")
+    print(" - report_true_positives.txt")
+    print(" - report_false_positives.txt")
+    print(" - report_false_negatives.txt")
 
 if __name__ == "__main__":
     print("Loading Lexicon...")
