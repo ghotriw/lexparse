@@ -18,11 +18,7 @@ use mwe::MweMatch;
 /// parser SubwordField fix_len: max subwords kept per word.
 /// This is an upper bound; actual tensor size shrinks to sentence max.
 const MAX_FIX_LEN: usize = 20;
-/// Encoder special-token ids — MUST match the tokenizer.json in the bundle.
-/// ModernBERT-base: [CLS]=50281, [UNK]=50280.
-/// (DeBERTa-v3 was [CLS]=1, [UNK]=3 — one bundle = one encoder.)
-const CLS_ID: i64 = 50281; // ROOT row / [CLS]
-const UNK_ID: i64 = 50280; // word that produced no pieces
+// Constants removed; token IDs are now dynamically loaded from the tokenizer into AppState.
 
 pub const MODEL_PATH: &str = "model/model.onnx";
 pub const VOCAB_PATH: &str = "model/vocabs.json";
@@ -169,6 +165,8 @@ pub struct AppState {
     pub feats: Vec<(String, Vec<String>)>,
     pub lexicon: mwe::MweLexicon,
     pub job_tx: mpsc::UnboundedSender<SentenceJob>,
+    pub cls_id: i64,
+    pub unk_id: i64,
 }
 
 pub fn idle_unload_secs() -> u64 {
@@ -233,7 +231,7 @@ pub fn run_inference(
     // Build the parser subword grid: row 0 = ROOT ([CLS]), row i+1 = word i's
     // sentencepiece ids; F = min(20, longest row), right-padded with 0.
     let mut rows: Vec<Vec<i64>> = Vec::with_capacity(n + 1);
-    rows.push(vec![CLS_ID]);
+    rows.push(vec![state.cls_id]);
     for word in &words {
         let enc = state
             .tokenizer
@@ -241,7 +239,7 @@ pub fn run_inference(
             .map_err(|e| anyhow::anyhow!("tokenize '{}': {}", word, e))?;
         let mut ids: Vec<i64> = enc.get_ids().iter().map(|&id| id as i64).collect();
         if ids.is_empty() {
-            ids.push(UNK_ID);
+            ids.push(state.unk_id);
         }
         rows.push(ids);
     }

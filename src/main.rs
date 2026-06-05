@@ -140,6 +140,9 @@ async fn main() -> anyhow::Result<()> {
     let tokenizer = tokenizers::Tokenizer::from_file("model/tokenizer.json")
         .map_err(|e| anyhow::anyhow!("tokenizer: {}", e))?;
 
+    let cls_id = tokenizer.token_to_id("[CLS]").unwrap_or(1) as i64;
+    let unk_id = tokenizer.token_to_id("[UNK]").unwrap_or(3) as i64;
+
     let (job_tx, job_rx) = mpsc::unbounded_channel::<SentenceJob>();
 
     let state = Arc::new(AppState {
@@ -150,6 +153,8 @@ async fn main() -> anyhow::Result<()> {
         feats: vocab.feats,
         lexicon,
         job_tx,
+        cls_id,
+        unk_id,
     });
 
     spawn_evictor(Arc::downgrade(&state));
