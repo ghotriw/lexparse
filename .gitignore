@@ -1,7 +1,7 @@
 target/
 model/
-test/
 tmp/
+test/evaluation_report.txt
 
 .DS_Store
 .env
