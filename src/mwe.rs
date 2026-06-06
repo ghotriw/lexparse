@@ -178,6 +178,19 @@ pub fn detect(
         if let Some(list) = lexicon.index.get(lemma) {
             candidate_entries.extend(list);
         }
+        
+        // Handle crude lemmatization of double consonants (e.g. "chopp" -> "chop").
+        // If the sentence lemma ends in a double consonant, candidate generation would miss
+        // the dictionary entry (which is keyed by "chop"). 
+        // We propose the undoubled version as a candidate as well.
+        let chars: Vec<char> = lemma.chars().collect();
+        let n = chars.len();
+        if n >= 2 && chars[n - 1] == chars[n - 2] {
+            let single: String = chars[..n - 1].iter().collect();
+            if let Some(list) = lexicon.index.get(&single) {
+                candidate_entries.extend(list);
+            }
+        }
     }
     candidate_entries.sort_unstable();
     candidate_entries.dedup();

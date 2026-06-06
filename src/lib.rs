@@ -571,6 +571,8 @@ mod e2e {
 
         let tokenizer = Tokenizer::from_file("model/tokenizer.json")
             .map_err(|e| anyhow::anyhow!("tokenizer: {}", e))?;
+        let cls_id = tokenizer.token_to_id("[CLS]").unwrap_or(1) as i64;
+        let unk_id = tokenizer.token_to_id("[UNK]").unwrap_or(3) as i64;
         let (job_tx, _job_rx) = mpsc::unbounded_channel();
         Ok(AppState {
             session: LazySession::new(),
@@ -580,6 +582,8 @@ mod e2e {
             feats: vocab.feats,
             lexicon,
             job_tx,
+            cls_id,
+            unk_id,
         })
     }
 

@@ -101,7 +101,14 @@ fn eq(a: &str, b: &str) -> bool {
     if short.chars().count() < 4 || !long.starts_with(short) {
         return false;
     }
-    INFLECTION_SUFFIXES.contains(&&long[short.len()..])
+    let residual = &long[short.len()..];
+    if INFLECTION_SUFFIXES.contains(&residual) {
+        return true;
+    }
+    // Handle crude lemmatization of double consonants (e.g. chopping -> chopp, short=chop).
+    // If the residual is a single character that equals the last character of the short lemma,
+    // it's a valid doubled consonant left over from stripping -ing or -ed.
+    residual.chars().count() == 1 && short.ends_with(residual)
 }
 
 /// `elements` -> (fixed_lemmas, gap_limits, slot_types).
@@ -478,5 +485,36 @@ mod tests {
         let sent = lems("pull together");
         let u = upos("VERB ADV");
         assert!(match_entry(&sent, &u, &sent, &elems).is_none());
+    }
+
+    #[test]
+    fn test_chopping_onions() {
+        let elems = [w("chop"), w("onion")];
+        let sent = vec![
+            "Aww".to_string(),
+            "...".to_string(),
+            "who".to_string(),
+            "'s".to_string(),
+            "chopp".to_string(), // lemma of chopping
+            "onion".to_string(), // lemma of onions
+            "in".to_string(),
+            "my".to_string(),
+            "room".to_string(),
+            "?".to_string(),
+        ];
+        let u = upos("INTJ PUNCT PRON AUX VERB NOUN ADP PRON NOUN PUNCT");
+        let surface = vec![
+            "Aww".to_string(),
+            "...".to_string(),
+            "who".to_string(),
+            "'s".to_string(),
+            "chopping".to_string(),
+            "onions".to_string(),
+            "in".to_string(),
+            "my".to_string(),
+            "room".to_string(),
+            "?".to_string(),
+        ];
+        assert!(match_entry(&sent, &u, &surface, &elems).is_some());
     }
 }
