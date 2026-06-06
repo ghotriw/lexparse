@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 const SLOT_MAX: usize = 4; // tokens allowed inside an explicit lexicon slot
-const GAP_MAX: usize = 1; // tokens allowed between two fixed lemmas, no slot
+// (GAP_MAX constant removed in favor of dynamic max_gap)
 
 /// Constraint on which tokens may fill a `Slot`.
 /// Checked against the UPOS of the first token in the slot span.
@@ -122,7 +122,7 @@ fn eq(a: &str, b: &str) -> bool {
 /// `elements` -> (fixed_lemmas, gap_limits, slot_types).
 /// `gaps[i]` = max tokens between fixed[i-1] and fixed[i] (`gaps[0]` unused).
 /// `slot_types[i]` = UPOS constraint for that gap; `Any` when no explicit slot.
-fn plan(elements: &[Element], is_phrasal: bool) -> (Vec<String>, Vec<usize>, Vec<SlotType>) {
+fn plan(elements: &[Element], max_gap: usize) -> (Vec<String>, Vec<usize>, Vec<SlotType>) {
     let mut fixed = Vec::new();
     let mut gaps = Vec::new();
     let mut slot_types = Vec::new();
@@ -139,7 +139,6 @@ fn plan(elements: &[Element], is_phrasal: bool) -> (Vec<String>, Vec<usize>, Vec
                     match slot {
                         Some(t) => { gaps.push(SLOT_MAX); slot_types.push(t); }
                         None    => { 
-                            let max_gap = if is_phrasal { 5 } else { GAP_MAX };
                             gaps.push(max_gap);
                             slot_types.push(SlotType::Any); 
                         }
@@ -223,9 +222,9 @@ pub fn match_entry(
     upos: &[String],
     surface: &[String],
     elements: &[Element],
-    is_phrasal: bool,
+    max_gap: usize,
 ) -> Option<Vec<usize>> {
-    let (fixed, gaps, slot_types) = plan(elements, is_phrasal);
+    let (fixed, gaps, slot_types) = plan(elements, max_gap);
     if fixed.is_empty() {
         return None;
     }
@@ -246,12 +245,10 @@ pub fn match_entry(
     for k in 1..fixed.len() {
         let mut nxt: BTreeMap<usize, (usize, Vec<usize>)> = BTreeMap::new();
         for (&p, (start, path)) in &state {
-            let hi = (p + 1 + gaps[k]).min(n.saturating_sub(1));
-            for q in (p + 1)..=hi {
-                if q >= n {
-                    break;
-                }
+            let mut effective_gap_len = 0;
+            for q in (p + 1)..n {
                 if eq(&lem[q], &fixed[k]) {
+                    let mut valid = true;
                     let is_punct = |t: usize| {
                         upos.get(t).map(String::as_str) == Some("PUNCT")
                     };
@@ -259,13 +256,10 @@ pub fn match_entry(
                     if (p + 1..q).any(|t| {
                         is_punct(t) && surface.get(t).is_some_and(|s| is_hard_boundary(s))
                     }) {
-                        continue;
+                        valid = false;
                     }
-                    // An implicit gap (no explicit slot) must not absorb a
-                    // content word. ADJ is allowed: it legitimately
-                    // pre-modifies the MWE's own noun ("on the concrete
-                    // floor").
-                    if gaps[k] <= GAP_MAX
+                    // An implicit gap (no explicit slot) must not absorb a content word.
+                    if valid && gaps[k] < SLOT_MAX
                         && (p + 1..q).any(|t| {
                             matches!(
                                 upos.get(t).map(String::as_str),
@@ -273,34 +267,45 @@ pub fn match_entry(
                             )
                         })
                     {
-                        continue;
+                        valid = false;
                     }
-                    // A comma between only two fixed words signals they are not
-                    // really together ("fair, playing"). Longer idioms may
-                    // legitimately contain one ("so far, so good").
-                    if gaps[k] <= GAP_MAX
+                    // A comma between only two fixed words signals they are not really together.
+                    if valid && gaps[k] < SLOT_MAX
                         && fixed.len() < 3
                         && (p + 1..q).any(|t| {
                             is_punct(t) && surface.get(t).map(String::as_str) == Some(",")
                         })
                     {
-                        continue;
+                        valid = false;
                     }
                     // For slot gaps, validate UPOS of the fill's first token.
-                    if gaps[k] > GAP_MAX
+                    if valid && gaps[k] == SLOT_MAX
                         && !slot_fill_ok(&slot_types[k], p + 1, q, upos)
                     {
-                        continue;
+                        valid = false;
                     }
-                    let better = match nxt.get(&q) {
-                        None => true,
-                        Some((prev_start, _)) => *start > *prev_start,
-                    };
-                    if better {
-                        let mut np = path.clone();
-                        np.push(q);
-                        nxt.insert(q, (*start, np));
+                    if valid {
+                        let better = match nxt.get(&q) {
+                            None => true,
+                            Some((prev_start, _)) => *start > *prev_start,
+                        };
+                        if better {
+                            let mut new_path = path.clone();
+                            new_path.push(q);
+                            nxt.insert(q, (*start, new_path));
+                        }
                     }
+                }
+
+                let q_is_punct = upos.get(q).map(String::as_str) == Some("PUNCT");
+                let q_surf = surface.get(q).map(String::as_str);
+                let q_is_possessive = q_surf == Some("'s") || q_surf == Some("’s");
+                
+                if !q_is_punct && !q_is_possessive {
+                    effective_gap_len += 1;
+                }
+                if effective_gap_len > gaps[k] {
+                    break;
                 }
             }
         }
@@ -339,7 +344,7 @@ mod tests {
     fn matches_contiguous() {
         let elems = [w("spill"), w("the"), w("bean")];
         let sent = lems("he spill the bean today");
-        let idx = match_entry(&sent, &no_upos(sent.len()), &sent, &elems, false).unwrap();
+        let idx = match_entry(&sent, &no_upos(sent.len()), &sent, &elems, 1).unwrap();
         assert_eq!(idx, vec![1, 2, 3]);
     }
 
@@ -349,7 +354,7 @@ mod tests {
         let elems = [w("make"), slot(), w("up"), w("mind")];
         let sent = lems("they make her up mind now");
         let u = upos("X VERB PRON X NOUN X");
-        let idx = match_entry(&sent, &u, &sent, &elems, false).unwrap();
+        let idx = match_entry(&sent, &u, &sent, &elems, 1).unwrap();
         assert_eq!(idx, vec![1, 3, 4]);
     }
 
@@ -357,7 +362,7 @@ mod tests {
     fn no_match_when_gap_too_wide() {
         let elems = [w("kick"), w("bucket")];
         let sent = lems("kick a big old bucket");
-        assert!(match_entry(&sent, &no_upos(sent.len()), &sent, &elems, false).is_none());
+        assert!(match_entry(&sent, &no_upos(sent.len()), &sent, &elems, 1).is_none());
     }
 
     #[test]
@@ -365,7 +370,7 @@ mod tests {
         let elems = [w("kick"), slot(), w("bucket")];
         let sent = lems("kick a big old bucket");
         let u = upos("VERB DET ADJ ADJ NOUN");
-        let idx = match_entry(&sent, &u, &sent, &elems, false).unwrap();
+        let idx = match_entry(&sent, &u, &sent, &elems, 1).unwrap();
         assert_eq!(idx, vec![0, 4]);
     }
 
@@ -373,7 +378,7 @@ mod tests {
     fn prefix_tolerant_eq() {
         let elems = [w("over"), w("moon")];
         let sent = lems("over moons");
-        assert!(match_entry(&sent, &no_upos(sent.len()), &sent, &elems, false).is_some());
+        assert!(match_entry(&sent, &no_upos(sent.len()), &sent, &elems, 1).is_some());
         assert!(eq("moon", "moons"));
         assert!(!eq("go", "gone"));
         assert!(!eq("the", "then"));
@@ -395,7 +400,7 @@ mod tests {
         let elems = [w("fair"), w("play")];
         let sent = lems("fair . play");
         let u = upos("ADJ PUNCT VERB");
-        assert!(match_entry(&sent, &u, &sent, &elems, false).is_none());
+        assert!(match_entry(&sent, &u, &sent, &elems, 1).is_none());
     }
 
     #[test]
@@ -404,7 +409,7 @@ mod tests {
         let elems = [w("so"), w("far"), w("so"), w("good")];
         let sent = lems("so far , so good");
         let u = upos("ADV ADV PUNCT ADV ADJ");
-        assert!(match_entry(&sent, &u, &sent, &elems, false).is_some());
+        assert!(match_entry(&sent, &u, &sent, &elems, 1).is_some());
     }
 
     #[test]
@@ -414,7 +419,7 @@ mod tests {
         let elems = [w("fair"), w("play")];
         let sent = lems("fair , play");
         let u = upos("ADJ PUNCT VERB");
-        assert!(match_entry(&sent, &u, &sent, &elems, false).is_none());
+        assert!(match_entry(&sent, &u, &sent, &elems, 1).is_none());
     }
 
     #[test]
@@ -423,7 +428,7 @@ mod tests {
         let elems = [w("over"), w("board")];
         let sent = lems("over - board");
         let u = upos("ADP PUNCT NOUN");
-        assert!(match_entry(&sent, &u, &sent, &elems, false).is_some());
+        assert!(match_entry(&sent, &u, &sent, &elems, 1).is_some());
     }
 
     #[test]
@@ -432,7 +437,7 @@ mod tests {
         let elems = [slot(), w("far"), slot(), w("good")];
         let sent = lems("so far , so good");
         let u = upos("ADV ADV PUNCT ADV ADJ");
-        assert!(match_entry(&sent, &u, &sent, &elems, false).is_some());
+        assert!(match_entry(&sent, &u, &sent, &elems, 1).is_some());
     }
 
     #[test]
@@ -441,7 +446,7 @@ mod tests {
         let elems = [slot(), w("far"), slot(), w("good")];
         let sent = lems("so far . so good");
         let u = upos("ADV ADV PUNCT ADV ADJ");
-        assert!(match_entry(&sent, &u, &sent, &elems, false).is_none());
+        assert!(match_entry(&sent, &u, &sent, &elems, 1).is_none());
     }
 
     #[test]
@@ -450,7 +455,7 @@ mod tests {
         let elems = [w("about"), w("time")];
         let sent = lems("about four time");
         let u = upos("ADP NUM NOUN");
-        assert!(match_entry(&sent, &u, &sent, &elems, false).is_none());
+        assert!(match_entry(&sent, &u, &sent, &elems, 1).is_none());
     }
 
     #[test]
@@ -458,10 +463,10 @@ mod tests {
         // Separable phrasal verbs: pronoun object / adverb modifier in the gap.
         let elems = [w("wake"), w("up")];
         let sent = lems("wake you up");
-        assert!(match_entry(&sent, &upos("VERB PRON ADP"), &sent, &elems, false).is_some());
+        assert!(match_entry(&sent, &upos("VERB PRON ADP"), &sent, &elems, 1).is_some());
         let sent2 = lems("look quickly around");
         let elems2 = [w("look"), w("around")];
-        assert!(match_entry(&sent2, &upos("VERB ADV ADV"), &sent2, &elems2, false).is_some());
+        assert!(match_entry(&sent2, &upos("VERB ADV ADV"), &sent2, &elems2, 1).is_some());
     }
 
     #[test]
@@ -470,7 +475,7 @@ mod tests {
         let elems = [w("pull"), slot_pron(), w("together")];
         let sent = lems("pull herself together");
         let u = upos("VERB PRON ADV");
-        assert!(match_entry(&sent, &u, &sent, &elems, false).is_some());
+        assert!(match_entry(&sent, &u, &sent, &elems, 1).is_some());
     }
 
     #[test]
@@ -479,7 +484,7 @@ mod tests {
         let elems = [w("pull"), slot_pron(), w("together")];
         let sent = lems("pull a team together");
         let u = upos("VERB DET NOUN ADV");
-        assert!(match_entry(&sent, &u, &sent, &elems, false).is_none());
+        assert!(match_entry(&sent, &u, &sent, &elems, 1).is_none());
     }
 
     #[test]
@@ -488,7 +493,7 @@ mod tests {
         let elems = [w("pull"), slot_pron(), w("together")];
         let sent = lems("pull young volunteer together");
         let u = upos("VERB ADJ NOUN ADV");
-        assert!(match_entry(&sent, &u, &sent, &elems, false).is_none());
+        assert!(match_entry(&sent, &u, &sent, &elems, 1).is_none());
     }
 
     #[test]
@@ -497,7 +502,7 @@ mod tests {
         let elems = [w("pull"), slot_pron(), w("together")];
         let sent = lems("pull together");
         let u = upos("VERB ADV");
-        assert!(match_entry(&sent, &u, &sent, &elems, false).is_none());
+        assert!(match_entry(&sent, &u, &sent, &elems, 1).is_none());
     }
 
     #[test]
@@ -528,6 +533,6 @@ mod tests {
             "room".to_string(),
             "?".to_string(),
         ];
-        assert!(match_entry(&sent, &u, &surface, &elems, false).is_some());
+        assert!(match_entry(&sent, &u, &surface, &elems, 1).is_some());
     }
 }

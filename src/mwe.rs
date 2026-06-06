@@ -221,7 +221,14 @@ pub fn detect(
     for &entry_idx in &candidate_entries {
         let entry = &lexicon.entries[entry_idx];
         let is_phrasal = is_phrasal_verb(entry);
-        let Some(idxs) = matcher::match_entry(&lemmas, upos, words, &entry.elements, is_phrasal) else {
+        let max_gap = if is_phrasal {
+            5
+        } else if entry.pos.as_deref() == Some("verb") || entry.pos.as_deref() == Some("phrase") || entry.pos.as_deref() == Some("idiom") {
+            1
+        } else {
+            0
+        };
+        let Some(idxs) = matcher::match_entry(&lemmas, upos, words, &entry.elements, max_gap) else {
             continue;
         };
 
