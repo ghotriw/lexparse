@@ -265,12 +265,38 @@ pub fn spawn_inference_worker(
     state: Arc<AppState>,
     mut rx: mpsc::UnboundedReceiver<SentenceJob>,
 ) {
+    let batch_size: usize = std::env::var("PARSER_BATCH_SIZE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+
     std::thread::spawn(move || {
-        while let Some(job) = rx.blocking_recv() {
-            let result = state.session.with_session(|session| {
-                run_inference(session, &state, &job.sentence)
-            });
-            let _ = job.reply.send(result);
+        loop {
+            let mut batch = Vec::with_capacity(batch_size);
+            if let Some(first) = rx.blocking_recv() {
+                batch.push(first);
+                while batch.len() < batch_size {
+                    if let Ok(next) = rx.try_recv() {
+                        batch.push(next);
+                    } else {
+                        break;
+                    }
+                }
+
+                let sentences: Vec<String> = batch.iter().map(|job| job.sentence.clone()).collect();
+                let batch_results = match state.session.with_session(|session| {
+                    Ok(run_inference_batch(session, &state, &sentences))
+                }) {
+                    Ok(res) => res,
+                    Err(e) => (0..batch.len()).map(|_| Err(anyhow::anyhow!("session: {}", e))).collect(),
+                };
+
+                for (job, res) in batch.into_iter().zip(batch_results) {
+                    let _ = job.reply.send(res);
+                }
+            } else {
+                break;
+            }
         }
     });
 }
@@ -287,177 +313,220 @@ pub fn run_inference(
     state: &AppState,
     sentence: &str,
 ) -> anyhow::Result<SentenceResult> {
+    let mut res = run_inference_batch(session, state, &[sentence.to_string()]);
+    res.pop().unwrap()
+}
+
+pub fn run_inference_batch(
+    session: &mut CModule,
+    state: &AppState,
+    sentences: &[String],
+) -> Vec<anyhow::Result<SentenceResult>> {
     let start_time = Instant::now();
-    // §5.1: word boundaries come from the canonical tokenizer, NOT whitespace.
-    let words = normalize::tokenize(sentence);
-    let n = words.len();
-    if n == 0 {
-        return Ok(SentenceResult {
-            tokens: vec![],
-            mwes: vec![],
-        });
-    }
+    let b = sentences.len();
+    let mut results = Vec::with_capacity(b);
+    if b == 0 { return results; }
 
-    // Build the parser subword grid: row 0 = ROOT ([CLS]), row i+1 = word i's
-    // sentencepiece ids; F = min(20, longest row), right-padded with 0.
-    let mut rows: Vec<Vec<i64>> = Vec::with_capacity(n + 1);
-    rows.push(vec![state.cls_id]);
-    for word in &words {
-        let enc = state
-            .tokenizer
-            .encode(word.as_str(), false)
-            .map_err(|e| anyhow::anyhow!("tokenize '{}': {}", word, e))?;
-        let mut ids: Vec<i64> = enc.get_ids().iter().map(|&id| id as i64).collect();
-        if ids.is_empty() {
-            ids.push(state.unk_id);
+    let batch_words: Vec<Vec<String>> = sentences.iter().map(|s| normalize::tokenize(s)).collect();
+    let batch_n: Vec<usize> = batch_words.iter().map(|w| w.len()).collect();
+    let max_n = batch_n.iter().copied().max().unwrap_or(0);
+
+    if max_n == 0 {
+        for _ in 0..b {
+            results.push(Ok(SentenceResult { tokens: vec![], mwes: vec![] }));
         }
-        rows.push(ids);
+        return results;
     }
-    // Compute dynamic fix_len: the longest subword list in this sentence, capped at MAX_FIX_LEN
-    let fix_len = rows.iter().map(|row| row.len()).max().unwrap_or(1).min(MAX_FIX_LEN);
-    let w_dim = n + 1;
 
-    let mut flat_ids = Vec::with_capacity(1 * w_dim * fix_len);
-    for r in 0..w_dim {
-        let row = rows.get(r).unwrap();
-        for c in 0..fix_len {
-            flat_ids.push(row.get(c).copied().unwrap_or(0));
+    let max_w_dim = max_n + 1;
+    let mut batch_rows: Vec<Vec<Vec<i64>>> = Vec::with_capacity(b);
+    let mut max_fix_len = 1;
+
+    for (i, words) in batch_words.iter().enumerate() {
+        let n = batch_n[i];
+        let mut rows: Vec<Vec<i64>> = Vec::with_capacity(n + 1);
+        rows.push(vec![state.cls_id]);
+        for word in words {
+            let enc = state.tokenizer.encode(word.as_str(), false);
+            let mut ids: Vec<i64> = match enc {
+                Ok(e) => e.get_ids().iter().map(|&id| id as i64).collect(),
+                Err(_) => vec![state.unk_id],
+            };
+            if ids.is_empty() {
+                ids.push(state.unk_id);
+            }
+            rows.push(ids);
+        }
+        let fix_len = rows.iter().map(|row| row.len()).max().unwrap_or(1).min(MAX_FIX_LEN);
+        if fix_len > max_fix_len { max_fix_len = fix_len; }
+        batch_rows.push(rows);
+    }
+
+    let mut flat_ids = vec![0i64; b * max_w_dim * max_fix_len];
+    for batch_idx in 0..b {
+        let rows = &batch_rows[batch_idx];
+        let w_dim = rows.len();
+        for r in 0..w_dim {
+            let row = &rows[r];
+            let flen = row.len().min(max_fix_len);
+            for c in 0..flen {
+                flat_ids[batch_idx * max_w_dim * max_fix_len + r * max_fix_len + c] = row[c];
+            }
         }
     }
 
     let subwords_tensor = Tensor::from_slice(&flat_ids)
-        .view([1, w_dim as i64, fix_len as i64])
+        .view([b as i64, max_w_dim as i64, max_fix_len as i64])
         .to_kind(Kind::Int64);
 
-    let output = session.forward_is(&[IValue::Tensor(subwords_tensor)])?;
-    let IValue::Tuple(tensors) = output else {
-        anyhow::bail!("Expected tuple output from TorchScript model");
+    let output = session.forward_is(&[IValue::Tensor(subwords_tensor)]);
+    let tensors = match output {
+        Ok(IValue::Tuple(t)) => t,
+        Ok(_) => {
+            for _ in 0..b { results.push(Err(anyhow::anyhow!("Expected tuple output"))); }
+            return results;
+        }
+        Err(e) => {
+            for _ in 0..b { results.push(Err(anyhow::anyhow!("forward failed: {}", e))); }
+            return results;
+        }
     };
 
     if tensors.len() < 3 {
-        anyhow::bail!("Expected at least 3 output tensors");
+        for _ in 0..b { results.push(Err(anyhow::anyhow!("Expected at least 3 output tensors"))); }
+        return results;
     }
 
-    let IValue::Tensor(arc_tensor) = &tensors[0] else { anyhow::bail!("s_arc is not a tensor") };
-    let IValue::Tensor(rel_tensor) = &tensors[1] else { anyhow::bail!("s_rel is not a tensor") };
-    let IValue::Tensor(pos_tensor) = &tensors[2] else { anyhow::bail!("s_pos is not a tensor") };
+    let IValue::Tensor(arc_tensor) = &tensors[0] else {
+        for _ in 0..b { results.push(Err(anyhow::anyhow!("s_arc is not a tensor"))); } return results;
+    };
+    let IValue::Tensor(rel_tensor) = &tensors[1] else {
+        for _ in 0..b { results.push(Err(anyhow::anyhow!("s_rel is not a tensor"))); } return results;
+    };
+    let IValue::Tensor(pos_tensor) = &tensors[2] else {
+        for _ in 0..b { results.push(Err(anyhow::anyhow!("s_pos is not a tensor"))); } return results;
+    };
 
     let ad = arc_tensor.size();
     let arc_len = (ad[0] * ad[1] * ad[2]) as usize;
     let mut arc_vec = vec![0.0f32; arc_len];
     arc_tensor.copy_data(&mut arc_vec, arc_len);
-    let arc = ArrayView3::from_shape((ad[0] as usize, ad[1] as usize, ad[2] as usize), &arc_vec)?;
+    let arc = match ArrayView3::from_shape((ad[0] as usize, ad[1] as usize, ad[2] as usize), &arc_vec) {
+        Ok(a) => a,
+        Err(e) => { for _ in 0..b { results.push(Err(anyhow::anyhow!("arc shape error: {}", e))); } return results; }
+    };
 
     let rd = rel_tensor.size();
     let rel_len = (rd[0] * rd[1] * rd[2] * rd[3]) as usize;
     let mut rel_vec = vec![0.0f32; rel_len];
     rel_tensor.copy_data(&mut rel_vec, rel_len);
-    let rel = ArrayView4::from_shape((rd[0] as usize, rd[1] as usize, rd[2] as usize, rd[3] as usize), &rel_vec)?;
+    let rel = match ArrayView4::from_shape((rd[0] as usize, rd[1] as usize, rd[2] as usize, rd[3] as usize), &rel_vec) {
+        Ok(a) => a,
+        Err(e) => { for _ in 0..b { results.push(Err(anyhow::anyhow!("rel shape error: {}", e))); } return results; }
+    };
 
     let pd = pos_tensor.size();
     let pos_len = (pd[0] * pd[1] * pd[2]) as usize;
     let mut pos_vec = vec![0.0f32; pos_len];
     pos_tensor.copy_data(&mut pos_vec, pos_len);
-    let pos = ArrayView3::from_shape((pd[0] as usize, pd[1] as usize, pd[2] as usize), &pos_vec)?;
+    let pos = match ArrayView3::from_shape((pd[0] as usize, pd[1] as usize, pd[2] as usize), &pos_vec) {
+        Ok(a) => a,
+        Err(e) => { for _ in 0..b { results.push(Err(anyhow::anyhow!("pos shape error: {}", e))); } return results; }
+    };
 
-    // s_feats [1, W, C, Vmax]
     let feats_arr: Option<Array4<f32>> = if state.feats.is_empty() {
         None
     } else {
         if tensors.len() < 4 {
-            anyhow::bail!("Expected 4 output tensors for feats");
-        }
-        let IValue::Tensor(feats_tensor) = &tensors[3] else { anyhow::bail!("s_feats is not a tensor") };
-        let fd = feats_tensor.size();
-        let feats_len = (fd[0] * fd[1] * fd[2] * fd[3]) as usize;
-        let mut feats_vec = vec![0.0f32; feats_len];
-        feats_tensor.copy_data(&mut feats_vec, feats_len);
-        Some(ArrayView4::from_shape((fd[0] as usize, fd[1] as usize, fd[2] as usize, fd[3] as usize), &feats_vec)?.to_owned())
-    };
-
-    // MST (Chu-Liu/Edmonds): edge u->v (u is head of v) has weight s_arc[v][u].
-    let mut score = vec![vec![f32::NEG_INFINITY; w_dim]; w_dim];
-    for v in 0..w_dim {
-        for (u, srow) in score.iter_mut().enumerate() {
-            if u != v {
-                srow[v] = arc[[0, v, u]];
+            for _ in 0..b { results.push(Err(anyhow::anyhow!("Expected 4 output tensors for feats"))); } return results;
+        } else if let IValue::Tensor(feats_tensor) = &tensors[3] {
+            let fd = feats_tensor.size();
+            let feats_len = (fd[0] * fd[1] * fd[2] * fd[3]) as usize;
+            let mut feats_vec = vec![0.0f32; feats_len];
+            feats_tensor.copy_data(&mut feats_vec, feats_len);
+            match ArrayView4::from_shape((fd[0] as usize, fd[1] as usize, fd[2] as usize, fd[3] as usize), &feats_vec) {
+                Ok(a) => Some(a.to_owned()),
+                Err(_) => None,
             }
+        } else {
+            None
         }
-    }
-    let heads = decode::max_arborescence(w_dim, 0, &score);
+    };
 
     let n_rels = rd[3] as usize;
     let n_upos = pd[2] as usize;
 
-    // UPOS for every grid row (ROOT + words). Precomputed because the MWE
-    // matcher needs the *head* token's POS, not just the current token's.
-    let upos_ids: Vec<usize> = (0..w_dim)
-        .map(|w| argmax((0..n_upos).map(|k| pos[[0, w, k]])))
-        .collect();
-    let upos_str =
-        |w: usize| state.upos.get(upos_ids[w]).cloned().unwrap_or_else(|| "X".into());
+    for batch_idx in 0..b {
+        let n = batch_n[batch_idx];
+        if n == 0 {
+            results.push(Ok(SentenceResult { tokens: vec![], mwes: vec![] }));
+            continue;
+        }
+        let w_dim = n + 1;
+        let words = &batch_words[batch_idx];
 
-    // CoNLL-U FEATS string for grid row `w`: per category, argmax over its own
-    // values; value index 0 is `_` (absent) and is skipped. Categories are already
-    // alphabetical (feats_from_map), matching CoNLL-U ordering. `_` when no feature.
-    let feats_str = |w: usize| -> String {
-        let Some(fa) = feats_arr.as_ref() else { return "_".into() };
-        let mut parts: Vec<String> = Vec::new();
-        for (c, (cat, values)) in state.feats.iter().enumerate() {
-            let best = argmax((0..values.len()).map(|k| fa[[0, w, c, k]]));
-            if best != 0 {
-                if let Some(val) = values.get(best) {
-                    parts.push(format!("{cat}={val}"));
+        let mut score = vec![vec![f32::NEG_INFINITY; w_dim]; w_dim];
+        for v in 0..w_dim {
+            for (u, srow) in score.iter_mut().enumerate() {
+                if u != v {
+                    srow[v] = arc[[batch_idx, v, u]];
                 }
             }
         }
-        if parts.is_empty() { "_".into() } else { parts.join("|") }
-    };
+        let heads = decode::max_arborescence(w_dim, 0, &score);
 
-    let mut tokens = Vec::with_capacity(n);
-    for i in 1..=n {
-        let head = heads[i];
-        let rel_id = argmax((0..n_rels).map(|k| rel[[0, i, head, k]]));
-        let rel = state.rels.get(rel_id).cloned().unwrap_or_else(|| "dep".into());
-        let upos = upos_str(i);
+        let upos_ids: Vec<usize> = (0..w_dim)
+            .map(|w| argmax((0..n_upos).map(|k| pos[[batch_idx, w, k]])))
+            .collect();
+        let upos_str = |w: usize| state.upos.get(upos_ids[w]).cloned().unwrap_or_else(|| "X".into());
 
-        tokens.push(ParsedToken {
-            id: i,
-            word: words[i - 1].clone(),
-            lemma: normalize::lemma(&words[i - 1]),
-            head,
-            rel,
-            upos,
-            feats: feats_str(i),
-        });
+        let feats_str = |w: usize| -> String {
+            let Some(fa) = feats_arr.as_ref() else { return "_".into() };
+            let mut parts: Vec<String> = Vec::new();
+            for (c, (cat, values)) in state.feats.iter().enumerate() {
+                let best = argmax((0..values.len()).map(|k| fa[[batch_idx, w, c, k]]));
+                if best != 0 {
+                    if let Some(val) = values.get(best) {
+                        parts.push(format!("{cat}={val}"));
+                    }
+                }
+            }
+            if parts.is_empty() { "_".into() } else { parts.join("|") }
+        };
+
+        let mut tokens = Vec::with_capacity(n);
+        for i in 1..=n {
+            let head = heads[i];
+            let rel_id = argmax((0..n_rels).map(|k| rel[[batch_idx, i, head, k]]));
+            let rel = state.rels.get(rel_id).cloned().unwrap_or_else(|| "dep".into());
+            let upos = upos_str(i);
+
+            tokens.push(ParsedToken {
+                id: i,
+                word: words[i - 1].clone(),
+                lemma: normalize::lemma(&words[i - 1]),
+                head,
+                rel,
+                upos,
+                feats: feats_str(i),
+            });
+        }
+
+        let is_verb: Vec<bool> = (0..n).map(|k| upos_str(k + 1) == "VERB").collect();
+        let word_rels: Vec<String> = tokens.iter().map(|t| t.rel.clone()).collect();
+        let word_upos: Vec<String> = tokens.iter().map(|t| t.upos.clone()).collect();
+        let mwes = mwe::detect(words, &is_verb, &heads, &word_rels, &word_upos, &state.lexicon);
+
+        results.push(Ok(SentenceResult { tokens, mwes }));
     }
 
-    // Model-predicted UPOS==VERB per word (grid row = word index + 1; row 0 is
-    // ROOT). Gates the POS-conditional `_IRREGULAR_VERB` remap in the matcher;
-    // stage3 localizes training spans with the same s_pos head → no skew.
-    let is_verb: Vec<bool> = (0..n).map(|k| upos_str(k + 1) == "VERB").collect();
-
-    let word_rels: Vec<String> = tokens.iter().map(|t| t.rel.clone()).collect();
-    let word_upos: Vec<String> = tokens.iter().map(|t| t.upos.clone()).collect();
-    let mwes = mwe::detect(&words, &is_verb, &heads, &word_rels, &word_upos, &state.lexicon);
-
     info!(
-        words = n,
-        mwes = mwes.len(),
+        batch_size = b,
         elapsed_ms = start_time.elapsed().as_millis(),
-        "parsed"
+        "parsed batch"
     );
 
-    // tracing::debug!(
-    //     words = n,
-    //     mwes = mwes.len(),
-    //     "parsed"
-    // );
-
-    Ok(SentenceResult {
-        tokens,
-        mwes,
-    })
+    results
 }
 
 // --- session ---
@@ -473,7 +542,7 @@ pub fn build_session() -> anyhow::Result<CModule> {
     if let Some(n) = intra_threads {
         tch::set_num_threads(n);
     }
-    
+
     info!("Loading TorchScript module from {}", MODEL_PATH);
     CModule::load(MODEL_PATH).map_err(|e| anyhow::anyhow!("{:?}", e))
 }
