@@ -169,7 +169,8 @@ async fn main() -> anyhow::Result<()> {
     info!(
         idle_unload_secs = idle_unload_secs(),
         lexicon = state.lexicon.entries.len(),
-        "model is lazy-loaded on first request, evicted after idle"
+        rss = lexparse::rss_mb().map(|v| format!("{v:.1} MB")),
+        "baseline (no model loaded)"
     );
 
     let app = Router::new()

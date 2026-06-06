@@ -109,13 +109,11 @@ impl From<VocabRaw> for Vocab {
 // --- jemalloc purge ---
 
 /// Ask jemalloc to return all freed pages to the OS immediately.
-/// Calls `mallctl("arena.4194304.purge")` — arena index 4194304 is
-/// `MALLCTL_ARENAS_ALL` in jemalloc 5.x, so this purges every arena
-/// (dirty + muzzy pages) in one shot.
+/// `MALLCTL_ARENAS_ALL` = 4096 in jemalloc 5.3 (tikv-jemalloc-sys 0.7).
 fn jemalloc_purge() {
     #[cfg(not(target_env = "msvc"))]
     {
-        let purge = b"arena.4194304.purge\0";
+        let purge = b"arena.4096.purge\0";
         // SAFETY: purge is a valid NUL-terminated mallctl name; no in/out params.
         let rc = unsafe {
             tikv_jemalloc_sys::mallctl(
@@ -129,6 +127,41 @@ fn jemalloc_purge() {
         if rc != 0 {
             tracing::warn!("jemalloc arena purge failed (rc={rc})");
         }
+    }
+}
+
+/// Current RSS in megabytes (Linux: /proc/self/statm, macOS: mach task_info).
+pub fn rss_mb() -> Option<f64> {
+    #[cfg(target_os = "linux")]
+    {
+        let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+        let rss_pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
+        Some(rss_pages as f64 * 4096.0 / 1_048_576.0)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::mem::MaybeUninit;
+        // SAFETY: standard mach API; info buffer is properly sized.
+        #[allow(deprecated)] // libc suggests mach2 crate; not worth the dep for diagnostics
+        unsafe {
+            let mut info = MaybeUninit::<libc::mach_task_basic_info_data_t>::uninit();
+            let mut count = (std::mem::size_of::<libc::mach_task_basic_info_data_t>()
+                / std::mem::size_of::<libc::natural_t>()) as libc::mach_msg_type_number_t;
+            let kr = libc::task_info(
+                libc::mach_task_self(),
+                libc::MACH_TASK_BASIC_INFO,
+                info.as_mut_ptr().cast(),
+                &mut count,
+            );
+            if kr != libc::KERN_SUCCESS {
+                return None;
+            }
+            Some(info.assume_init().resident_size as f64 / 1_048_576.0)
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
     }
 }
 
@@ -176,9 +209,17 @@ impl LazySession {
         }
         let mut guard = self.inner.lock().unwrap();
         if guard.is_some() {
+            let before = rss_mb();
             *guard = None; // Drop frees ORT native memory deterministically.
+            let after_drop = rss_mb();
             jemalloc_purge();
-            info!("model evicted after {idle:?} idle; RSS drops to baseline");
+            let after_purge = rss_mb();
+            info!(
+                rss_before = before.map(|v| format!("{v:.1} MB")),
+                rss_after_drop = after_drop.map(|v| format!("{v:.1} MB")),
+                rss_after_purge = after_purge.map(|v| format!("{v:.1} MB")),
+                "model evicted after {idle:?} idle"
+            );
         }
     }
 }
