@@ -37,6 +37,7 @@ fn build_state() -> anyhow::Result<AppState> {
 }
 
 fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
     // Run from the lexparse root dir
     let test_path = "tmp/wiktextract_test_data.jsonl";
 
@@ -75,49 +76,66 @@ fn main() -> anyhow::Result<()> {
 
     let start_time = std::time::Instant::now();
 
+    let batch_size = std::env::var("PARSER_BATCH_SIZE")
+        .unwrap_or_else(|_| "1".to_string())
+        .parse::<usize>()
+        .unwrap_or(1)
+        .max(1);
+    
+    println!("Using PARSER_BATCH_SIZE={}", batch_size);
+
     state.session.with_session(|session| {
-        for (i, case) in test_data.iter().enumerate() {
-            if i > 0 && i % 50 == 0 {
+        let mut processed = 0;
+        
+        for chunk in test_data.chunks(batch_size) {
+            if processed > 0 && processed % 50 < batch_size {
                 use std::io::Write;
                 let elapsed = start_time.elapsed().as_secs_f64();
-                let speed = i as f64 / elapsed;
-                let remaining = (total_expected - i) as f64 / speed;
+                let speed = processed as f64 / elapsed;
+                let remaining = (total_expected - processed) as f64 / speed;
                 let mins = (remaining / 60.0) as u64;
                 let secs = (remaining % 60.0) as u64;
-                print!("\rProcessed {}/{} (ETA: {:02}:{:02})   ", i, total_expected, mins, secs);
+                print!("\rProcessed {}/{} (ETA: {:02}:{:02})   ", processed, total_expected, mins, secs);
                 std::io::stdout().flush().unwrap();
             }
 
-            let result = match run_inference(session, &state, &case.text) {
-                Ok(r) => r,
-                Err(e) => {
-                    println!("\nInference failed on '{}': {}", case.text, e);
-                    continue;
+            let texts: Vec<String> = chunk.iter().map(|c| c.text.clone()).collect();
+            let batch_results = run_inference_batch(session, &state, &texts);
+
+            for (j, res) in batch_results.into_iter().enumerate() {
+                let case = &chunk[j];
+                let result = match res {
+                    Ok(r) => r,
+                    Err(e) => {
+                        println!("\nInference failed on '{}': {}", case.text, e);
+                        continue;
+                    }
+                };
+
+                total_predicted_mwes += result.mwes.len();
+
+                let matched = result
+                    .mwes
+                    .iter()
+                    .find(|m| m.phrase.to_lowercase() == case.expected_phrase);
+
+                if let Some(m) = matched {
+                    true_positives += 1;
+                    let log_str = format!(
+                        "Sentence: {}\n  [✓] FOUND: '{}' (matched lexicon: {})\n",
+                        case.text, m.surface, case.expected_phrase
+                    );
+                    report_lines.push(log_str);
+                } else {
+                    let log_str = format!(
+                        "Sentence: {}\n  [✗] MISSED (False Negative): Expected '{}'\n",
+                        case.text, case.expected_phrase
+                    );
+                    report_lines.push(log_str.clone());
+                    fn_report_lines.push(log_str);
                 }
-            };
-
-            total_predicted_mwes += result.mwes.len();
-
-            let matched = result
-                .mwes
-                .iter()
-                .find(|m| m.phrase.to_lowercase() == case.expected_phrase);
-
-            if let Some(m) = matched {
-                true_positives += 1;
-                let log_str = format!(
-                    "Sentence: {}\n  [✓] FOUND: '{}' (matched lexicon: {})\n",
-                    case.text, m.surface, case.expected_phrase
-                );
-                report_lines.push(log_str);
-            } else {
-                let log_str = format!(
-                    "Sentence: {}\n  [✗] MISSED (False Negative): Expected '{}'\n",
-                    case.text, case.expected_phrase
-                );
-                report_lines.push(log_str.clone());
-                fn_report_lines.push(log_str);
             }
+            processed += chunk.len();
         }
 
         println!("\rProcessed {}/{}      ", total_expected, total_expected);
