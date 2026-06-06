@@ -106,6 +106,44 @@ impl From<VocabRaw> for Vocab {
     }
 }
 
+// --- jemalloc purge ---
+
+/// Ask jemalloc to return all freed pages to the OS immediately.
+/// `arena.0.purge` collapses dirty+muzzy pages across every arena in one call,
+/// far more effective than waiting for the default 10 s decay timers.
+/// A no-op (logged warning) if mallctl is unavailable or fails.
+fn jemalloc_purge() {
+    // SAFETY: tikv-jemallocator re-exports jemalloc as the global allocator,
+    // so `mallctl` is the jemalloc symbol. "arena.0.purge" is a void→void ctl.
+    #[cfg(not(target_env = "msvc"))]
+    {
+        unsafe extern "C" {
+            fn mallctl(
+                name: *const u8,
+                oldp: *mut std::ffi::c_void,
+                oldlenp: *mut usize,
+                newp: *mut std::ffi::c_void,
+                newlen: usize,
+            ) -> i32;
+        }
+        // jemalloc 5.x: arena index 4194304 (= MALLCTL_ARENAS_ALL) means
+        // "purge every arena", collapsing all dirty + muzzy pages at once.
+        let purge_mib = b"arena.4194304.purge\0";
+        unsafe {
+            let rc = mallctl(
+                purge_mib.as_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
+            );
+            if rc != 0 {
+                tracing::warn!("jemalloc arena purge failed (rc={rc})");
+            }
+        }
+    }
+}
+
 // --- state ---
 
 const DEFAULT_IDLE_UNLOAD_SECS: u64 = 300;
@@ -151,6 +189,7 @@ impl LazySession {
         let mut guard = self.inner.lock().unwrap();
         if guard.is_some() {
             *guard = None; // Drop frees ORT native memory deterministically.
+            jemalloc_purge();
             info!("model evicted after {idle:?} idle; RSS drops to baseline");
         }
     }
@@ -181,8 +220,11 @@ pub fn idle_unload_secs() -> u64 {
 /// evicts the idle session. Stops itself once `AppState` is dropped.
 pub fn spawn_evictor(state: Weak<AppState>) {
     let idle = Duration::from_secs(idle_unload_secs());
+    // Poll at most every 30 s but no slower than half the idle timeout,
+    // so short timeouts (e.g. 10 s) are actually responsive.
+    let poll = Duration::from_secs((idle.as_secs() / 2).max(1).min(30));
     std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_secs(60));
+        std::thread::sleep(poll);
         let Some(state) = state.upgrade() else { break };
         state.session.maybe_evict(idle);
     });
