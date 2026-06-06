@@ -174,21 +174,24 @@ pub fn detect(
 
     // Candidate entries: those whose first fixed lemma occurs in the sentence.
     let mut candidate_entries: Vec<usize> = Vec::new();
-    for lemma in &lemmas {
+    for (idx, lemma) in lemmas.iter().enumerate() {
         if let Some(list) = lexicon.index.get(lemma) {
             candidate_entries.extend(list);
         }
-        
+
         // Handle crude lemmatization of double consonants (e.g. "chopp" -> "chop").
-        // If the sentence lemma ends in a double consonant, candidate generation would miss
-        // the dictionary entry (which is keyed by "chop"). 
-        // We propose the undoubled version as a candidate as well.
-        let chars: Vec<char> = lemma.chars().collect();
-        let n = chars.len();
-        if n >= 2 && chars[n - 1] == chars[n - 2] {
-            let single: String = chars[..n - 1].iter().collect();
-            if let Some(list) = lexicon.index.get(&single) {
-                candidate_entries.extend(list);
+        // Only applies to verbs (e.g., chopping, dropped) and length >= 4 (e.g., "rubb").
+        // This avoids words like "off" -> "of" or "too" -> "to", which would
+        // catastrophically pull in hundreds of dictionary entries to check.
+        let is_v = is_verb.get(idx).copied().unwrap_or(false);
+        if is_v {
+            let bytes = lemma.as_bytes();
+            let n = bytes.len();
+            if n >= 4 && bytes[n - 1] == bytes[n - 2] {
+                let single = &lemma[..n - 1];
+                if let Some(list) = lexicon.index.get(single) {
+                    candidate_entries.extend(list);
+                }
             }
         }
     }
@@ -250,28 +253,43 @@ fn keep_mask(cands: &[MweMatch]) -> Vec<bool> {
             if i == j {
                 continue;
             }
-            let overlap = cands[i]
+
+            // Check if i's tokens are a subset of j's tokens.
+            let i_subset_of_j = cands[i]
                 .token_ids
                 .iter()
-                .any(|t| cands[j].token_ids.contains(t));
-            if !overlap {
+                .all(|t| cands[j].token_ids.contains(t));
+
+            if !i_subset_of_j {
+                // If i has tokens that j doesn't, it's a partial overlap.
+                // We keep both, so don't drop i.
                 continue;
             }
-            let len_i = cands[i].token_ids.len();
-            let len_j = cands[j].token_ids.len();
-            let gap_i = cands[i].token_ids.last().unwrap() - cands[i].token_ids.first().unwrap()
-                + 1
-                - len_i;
-            let gap_j = cands[j].token_ids.last().unwrap() - cands[j].token_ids.first().unwrap()
-                + 1
-                - len_j;
 
-            let j_wins = if len_j != len_i {
-                len_j > len_i // longer phrase wins
-            } else if gap_j != gap_i {
-                gap_j < gap_i // more continuous phrase wins
+            let j_subset_of_i = cands[j]
+                .token_ids
+                .iter()
+                .all(|t| cands[i].token_ids.contains(t));
+
+            // i is a subset of j. Determine if j wins.
+            let j_wins = if j_subset_of_i {
+                // They claim the exact same set of tokens. Tie-breaker needed.
+                let gap_i =
+                    cands[i].token_ids.last().unwrap() - cands[i].token_ids.first().unwrap() + 1
+                        - cands[i].token_ids.len();
+                let gap_j =
+                    cands[j].token_ids.last().unwrap() - cands[j].token_ids.first().unwrap() + 1
+                        - cands[j].token_ids.len();
+
+                if gap_j != gap_i {
+                    gap_j < gap_i // more continuous phrase wins
+                } else {
+                    j < i // deterministic tie-breaker
+                }
             } else {
-                j < i // tie-breaker
+                // j is a strict superset of i (has all of i's tokens plus more).
+                // j wins, i is subsumed.
+                true
             };
 
             if j_wins {

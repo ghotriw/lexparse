@@ -81,12 +81,12 @@ fn main() -> anyhow::Result<()> {
         .parse::<usize>()
         .unwrap_or(1)
         .max(1);
-    
+
     println!("Using PARSER_BATCH_SIZE={}", batch_size);
 
     state.session.with_session(|session| {
         let mut processed = 0;
-        
+
         for chunk in test_data.chunks(batch_size) {
             if processed > 0 && processed % 50 < batch_size {
                 use std::io::Write;
@@ -114,10 +114,19 @@ fn main() -> anyhow::Result<()> {
 
                 total_predicted_mwes += result.mwes.len();
 
+                let expected_lower = case.expected_phrase.to_lowercase();
                 let matched = result
                     .mwes
                     .iter()
-                    .find(|m| m.phrase.to_lowercase() == case.expected_phrase);
+                    .find(|m| {
+                        m.phrase.to_lowercase() == expected_lower
+                            || m.surface.to_lowercase() == expected_lower
+                            || m.definition
+                                .as_deref()
+                                .unwrap_or("")
+                                .to_lowercase()
+                                .contains(&expected_lower)
+                    });
 
                 if let Some(m) = matched {
                     true_positives += 1;

@@ -98,17 +98,25 @@ fn eq(a: &str, b: &str) -> bool {
     } else {
         (b, a)
     };
-    if short.chars().count() < 4 || !long.starts_with(short) {
+    if !long.starts_with(short) {
         return false;
     }
+    
     let residual = &long[short.len()..];
-    if INFLECTION_SUFFIXES.contains(&residual) {
-        return true;
-    }
+    
     // Handle crude lemmatization of double consonants (e.g. chopping -> chopp, short=chop).
     // If the residual is a single character that equals the last character of the short lemma,
     // it's a valid doubled consonant left over from stripping -ing or -ed.
-    residual.chars().count() == 1 && short.ends_with(residual)
+    // We allow this even for 3-letter words like "log" -> "logg" or "run" -> "runn".
+    if residual.chars().count() == 1 && short.ends_with(residual) {
+        return true;
+    }
+
+    if short.chars().count() < 4 {
+        return false;
+    }
+    
+    INFLECTION_SUFFIXES.contains(&residual)
 }
 
 /// `elements` -> (fixed_lemmas, gap_limits, slot_types).
