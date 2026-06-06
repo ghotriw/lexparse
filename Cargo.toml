@@ -13,8 +13,8 @@ name = "parser-service"
 path = "src/main.rs"
 
 [[bin]]
-name = "builder"
-path = "src/bin/builder.rs"
+name = "lexicon_builder"
+path = "src/bin/lexicon_builder.rs"
 
 [[bin]]
 name = "correct_idioms"
@@ -23,6 +23,10 @@ path = "src/bin/correct_idioms.rs"
 [[bin]]
 name = "eval_wiktextract"
 path = "src/bin/eval_wiktextract.rs"
+
+[[bin]]
+name = "extract_wiktextract_test"
+path = "src/bin/extract_wiktextract_test.rs"
 
 [dependencies]
 axum = "0.8"

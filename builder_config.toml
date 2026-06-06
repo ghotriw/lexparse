@@ -35,6 +35,7 @@ phrase_blocklist = [
   "have got",        # pure grammatical construction
   "liked to",        # pure grammatical construction
   "there be",        # pure grammatical construction
+  "take part with",  # archaic; causes false positive for "take part"
 ]
 
 # Mapping of Wiktionary categories to internal parser category names

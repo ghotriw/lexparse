@@ -144,7 +144,7 @@ Saves the decompressed dump to `tmp/raw-wiktextract-data.jsonl`.
 ### 2. Build the lexicon
 
 ```bash
-cargo run --release --bin builder
+cargo run --release --bin lexicon_builder
 ```
 
 ## Testing
@@ -156,6 +156,15 @@ cargo test
 # Full regression tests including MWE detection (requires model artifacts)
 cargo test -- --include-ignored
 ```
+
+## Utility Scripts
+
+The `src/bin/` directory contains several utility scripts:
+- `lexicon_builder` — builds the primary lexicon from the Wiktionary dump.
+- `correct_idioms` — LLM-assisted script to reclassify false positive idioms using Gemini.
+- `extract_wiktextract_test` — extracts a JSONL test dataset of example sentences for phrases in the lexicon.
+- `eval_wiktextract` — evaluates parser accuracy over the extracted test sentences.
+- `tokenize_lines` — helper to tokenize a stream of text.
 
 ## Configuration
 

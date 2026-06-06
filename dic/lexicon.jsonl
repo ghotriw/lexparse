@@ -19015,7 +19015,6 @@
 {"id":1077968428,"phrase":"up a height","categories":["idiom"],"pos":"adj","definition":"High up.","tags":["Geordie","figuratively","idiomatic","literally"],"elements":[["w","up"],["w","a"],["w","height"]]}
 {"id":2660362310,"phrase":"preach down","categories":["fixed_collocation","phrasal_verb"],"pos":"verb","definition":"To speak vehemently against; to decry.","tags":["transitive"],"elements":[["w","preach"],["w","down"]]}
 {"id":1611853225,"phrase":"preach up","categories":["fixed_collocation","phrasal_verb"],"pos":"verb","definition":"To speak strongly in praise of.","tags":["transitive"],"elements":[["w","preach"],["w","up"]]}
-{"id":1488801534,"phrase":"take part with","categories":["fixed_collocation"],"pos":"verb","definition":"To side with.","tags":["obsolete","transitive"],"elements":[["w","take"],["w","part"],["w","with"]]}
 {"id":1887690240,"phrase":"level down","categories":["fixed_collocation","phrasal_verb"],"pos":"verb","definition":"To lower to the same level or status.","tags":[],"elements":[["w","level"],["w","down"]]}
 {"id":2141433153,"phrase":"round about","categories":["fixed_collocation"],"pos":"adv","definition":null,"tags":[],"elements":[["w","round"],["w","about"]]}
 {"id":986966844,"phrase":"big end of town","categories":["idiom"],"pos":"noun","definition":"The top end of town.","tags":["idiomatic","informal"],"elements":[["w","big"],["w","end"],["w","of"],["w","town"]]}
