@@ -42,3 +42,4 @@ dotenvy = "0.15"
 toml = "1.1.2"
 ureq = { version = "2", features = ["json"] }
 tikv-jemallocator = "0.7.0"
+tikv-jemalloc-sys = "0.7.0"

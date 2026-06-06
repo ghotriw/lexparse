@@ -109,37 +109,25 @@ impl From<VocabRaw> for Vocab {
 // --- jemalloc purge ---
 
 /// Ask jemalloc to return all freed pages to the OS immediately.
-/// `arena.0.purge` collapses dirty+muzzy pages across every arena in one call,
-/// far more effective than waiting for the default 10 s decay timers.
-/// A no-op (logged warning) if mallctl is unavailable or fails.
+/// Calls `mallctl("arena.4194304.purge")` — arena index 4194304 is
+/// `MALLCTL_ARENAS_ALL` in jemalloc 5.x, so this purges every arena
+/// (dirty + muzzy pages) in one shot.
 fn jemalloc_purge() {
-    // SAFETY: tikv-jemallocator re-exports jemalloc as the global allocator,
-    // so `mallctl` is the jemalloc symbol. "arena.0.purge" is a void→void ctl.
     #[cfg(not(target_env = "msvc"))]
     {
-        unsafe extern "C" {
-            fn mallctl(
-                name: *const u8,
-                oldp: *mut std::ffi::c_void,
-                oldlenp: *mut usize,
-                newp: *mut std::ffi::c_void,
-                newlen: usize,
-            ) -> i32;
-        }
-        // jemalloc 5.x: arena index 4194304 (= MALLCTL_ARENAS_ALL) means
-        // "purge every arena", collapsing all dirty + muzzy pages at once.
-        let purge_mib = b"arena.4194304.purge\0";
-        unsafe {
-            let rc = mallctl(
-                purge_mib.as_ptr(),
+        let purge = b"arena.4194304.purge\0";
+        // SAFETY: purge is a valid NUL-terminated mallctl name; no in/out params.
+        let rc = unsafe {
+            tikv_jemalloc_sys::mallctl(
+                purge.as_ptr().cast(),
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 0,
-            );
-            if rc != 0 {
-                tracing::warn!("jemalloc arena purge failed (rc={rc})");
-            }
+            )
+        };
+        if rc != 0 {
+            tracing::warn!("jemalloc arena purge failed (rc={rc})");
         }
     }
 }
