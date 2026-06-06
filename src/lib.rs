@@ -1,6 +1,5 @@
-use ndarray::{Array3, Array4, ArrayView3, ArrayView4};
-use ort::ep::CPU;
-use ort::session::{builder::GraphOptimizationLevel, Session};
+use ndarray::{Array4, ArrayView3, ArrayView4};
+use tch::{CModule, Tensor, Kind, IValue};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -20,7 +19,7 @@ use mwe::MweMatch;
 const MAX_FIX_LEN: usize = 20;
 // Constants removed; token IDs are now dynamically loaded from the tokenizer into AppState.
 
-pub const MODEL_PATH: &str = "model/model.onnx";
+pub const MODEL_PATH: &str = "model/traced_model.pt";
 pub const VOCAB_PATH: &str = "model/vocabs.json";
 
 pub const LEXICON_PATH: &str = "dic/lexicon.jsonl";
@@ -173,7 +172,7 @@ const DEFAULT_IDLE_UNLOAD_SECS: u64 = 300;
 /// Service profile is a few requests/day, so the ~1–2 s cold-start on the
 /// first request after eviction is an acceptable trade for ~170 MB idle RSS.
 pub struct LazySession {
-    inner: Mutex<Option<Session>>,
+    inner: Mutex<Option<CModule>>,
     last_used: Mutex<Instant>,
 }
 
@@ -190,7 +189,7 @@ impl LazySession {
     /// cannot be evicted mid-run and concurrent requests serialize here.
     pub fn with_session<F, R>(&self, f: F) -> anyhow::Result<R>
     where
-        F: FnOnce(&mut Session) -> anyhow::Result<R>,
+        F: FnOnce(&mut CModule) -> anyhow::Result<R>,
     {
         let mut guard = self.inner.lock().unwrap();
         if guard.is_none() {
@@ -284,7 +283,7 @@ fn argmax(xs: impl Iterator<Item = f32>) -> usize {
 }
 
 pub fn run_inference(
-    session: &mut Session,
+    session: &mut CModule,
     state: &AppState,
     sentence: &str,
 ) -> anyhow::Result<SentenceResult> {
@@ -318,46 +317,62 @@ pub fn run_inference(
     let fix_len = rows.iter().map(|row| row.len()).max().unwrap_or(1).min(MAX_FIX_LEN);
     let w_dim = n + 1;
 
-    let mut subwords = Array3::<i64>::zeros((1, w_dim, fix_len));
-    for (r, row) in rows.iter().enumerate() {
-        for (c, &id) in row.iter().take(fix_len).enumerate() {
-            subwords[[0, r, c]] = id;
+    let mut flat_ids = Vec::with_capacity(1 * w_dim * fix_len);
+    for r in 0..w_dim {
+        let row = rows.get(r).unwrap();
+        for c in 0..fix_len {
+            flat_ids.push(row.get(c).copied().unwrap_or(0));
         }
     }
 
-    let subwords_val =
-        ort::value::Value::from_array(subwords).map_err(|e| anyhow::anyhow!("{:?}", e))?;
-    let outputs = session
-        .run(vec![("subwords", subwords_val)])
-        .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+    let subwords_tensor = Tensor::from_slice(&flat_ids)
+        .view([1, w_dim as i64, fix_len as i64])
+        .to_kind(Kind::Int64);
 
-    let (arc_shape, arc_data) = outputs["s_arc"]
-        .try_extract_tensor::<f32>()
-        .map_err(|e| anyhow::anyhow!("{:?}", e))?;
-    let (rel_shape, rel_data) = outputs["s_rel"]
-        .try_extract_tensor::<f32>()
-        .map_err(|e| anyhow::anyhow!("{:?}", e))?;
-    let (pos_shape, pos_data) = outputs["s_pos"]
-        .try_extract_tensor::<f32>()
-        .map_err(|e| anyhow::anyhow!("{:?}", e))?;
-    let dims = |s: &[i64]| s.iter().map(|&d| d as usize).collect::<Vec<_>>();
-    let ad = dims(arc_shape);
-    let arc = ArrayView3::from_shape((ad[0], ad[1], ad[2]), arc_data)?;
-    let rd = dims(rel_shape);
-    let rel = ArrayView4::from_shape((rd[0], rd[1], rd[2], rd[3]), rel_data)?;
-    let pd = dims(pos_shape);
-    let pos = ArrayView3::from_shape((pd[0], pd[1], pd[2]), pos_data)?;
+    let output = session.forward_is(&[IValue::Tensor(subwords_tensor)])?;
+    let IValue::Tuple(tensors) = output else {
+        anyhow::bail!("Expected tuple output from TorchScript model");
+    };
 
-    // s_feats [1, W, C, Vmax] — present only for upos_feats models. Owned so the
-    // per-word closure below doesn't borrow `outputs`.
+    if tensors.len() < 3 {
+        anyhow::bail!("Expected at least 3 output tensors");
+    }
+
+    let IValue::Tensor(arc_tensor) = &tensors[0] else { anyhow::bail!("s_arc is not a tensor") };
+    let IValue::Tensor(rel_tensor) = &tensors[1] else { anyhow::bail!("s_rel is not a tensor") };
+    let IValue::Tensor(pos_tensor) = &tensors[2] else { anyhow::bail!("s_pos is not a tensor") };
+
+    let ad = arc_tensor.size();
+    let arc_len = (ad[0] * ad[1] * ad[2]) as usize;
+    let mut arc_vec = vec![0.0f32; arc_len];
+    arc_tensor.copy_data(&mut arc_vec, arc_len);
+    let arc = ArrayView3::from_shape((ad[0] as usize, ad[1] as usize, ad[2] as usize), &arc_vec)?;
+
+    let rd = rel_tensor.size();
+    let rel_len = (rd[0] * rd[1] * rd[2] * rd[3]) as usize;
+    let mut rel_vec = vec![0.0f32; rel_len];
+    rel_tensor.copy_data(&mut rel_vec, rel_len);
+    let rel = ArrayView4::from_shape((rd[0] as usize, rd[1] as usize, rd[2] as usize, rd[3] as usize), &rel_vec)?;
+
+    let pd = pos_tensor.size();
+    let pos_len = (pd[0] * pd[1] * pd[2]) as usize;
+    let mut pos_vec = vec![0.0f32; pos_len];
+    pos_tensor.copy_data(&mut pos_vec, pos_len);
+    let pos = ArrayView3::from_shape((pd[0] as usize, pd[1] as usize, pd[2] as usize), &pos_vec)?;
+
+    // s_feats [1, W, C, Vmax]
     let feats_arr: Option<Array4<f32>> = if state.feats.is_empty() {
         None
     } else {
-        let (fs, fdat) = outputs["s_feats"]
-            .try_extract_tensor::<f32>()
-            .map_err(|e| anyhow::anyhow!("{:?}", e))?;
-        let fd = dims(fs);
-        Some(ArrayView4::from_shape((fd[0], fd[1], fd[2], fd[3]), fdat)?.to_owned())
+        if tensors.len() < 4 {
+            anyhow::bail!("Expected 4 output tensors for feats");
+        }
+        let IValue::Tensor(feats_tensor) = &tensors[3] else { anyhow::bail!("s_feats is not a tensor") };
+        let fd = feats_tensor.size();
+        let feats_len = (fd[0] * fd[1] * fd[2] * fd[3]) as usize;
+        let mut feats_vec = vec![0.0f32; feats_len];
+        feats_tensor.copy_data(&mut feats_vec, feats_len);
+        Some(ArrayView4::from_shape((fd[0] as usize, fd[1] as usize, fd[2] as usize, fd[3] as usize), &feats_vec)?.to_owned())
     };
 
     // MST (Chu-Liu/Edmonds): edge u->v (u is head of v) has weight s_arc[v][u].
@@ -371,8 +386,8 @@ pub fn run_inference(
     }
     let heads = decode::max_arborescence(w_dim, 0, &score);
 
-    let n_rels = rd[3];
-    let n_upos = pd[2];
+    let n_rels = rd[3] as usize;
+    let n_upos = pd[2] as usize;
 
     // UPOS for every grid row (ROOT + words). Precomputed because the MWE
     // matcher needs the *head* token's POS, not just the current token's.
@@ -447,56 +462,20 @@ pub fn run_inference(
 
 // --- session ---
 
-fn env_flag(key: &str, default: bool) -> bool {
-    match std::env::var(key) {
-        Ok(v) => matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        ),
-        Err(_) => default,
-    }
-}
 
-pub fn build_session() -> anyhow::Result<Session> {
-    // Input length varies per sentence; with mem-pattern ON, ORT caches
-    // allocation patterns sized to the longest sentence seen and keeps them —
-    // that is the main RSS-peak driver here, so default OFF.
-    let mem_pattern = env_flag("PARSER_MEM_PATTERN", false);
-    // Arena trades RSS for latency: keep ON for dev throughput, set
-    // PARSER_CPU_ARENA=0 on a weak server to shed ~100–300 MB RSS.
-    let cpu_arena = env_flag("PARSER_CPU_ARENA", true);
+
+pub fn build_session() -> anyhow::Result<CModule> {
     let intra_threads = std::env::var("PARSER_INTRA_THREADS")
         .ok()
-        .and_then(|v| v.trim().parse::<usize>().ok())
+        .and_then(|v| v.trim().parse::<i32>().ok())
         .filter(|&n| n > 0);
 
-    info!(
-        mem_pattern,
-        cpu_arena,
-        intra_threads = intra_threads.unwrap_or(0),
-        "ORT session config (0 intra_threads = ORT default / all cores)"
-    );
-
-    let mut builder = Session::builder()
-        .map_err(|e| anyhow::anyhow!("{:?}", e))?
-        .with_optimization_level(GraphOptimizationLevel::Level3)
-        .map_err(|e| anyhow::anyhow!("{:?}", e))?
-        .with_memory_pattern(mem_pattern)
-        .map_err(|e| anyhow::anyhow!("{:?}", e))?
-        .with_execution_providers([CPU::default().with_arena_allocator(cpu_arena).build()])
-        .map_err(|e| anyhow::anyhow!("{:?}", e))?;
-
     if let Some(n) = intra_threads {
-        builder = builder
-            .with_intra_threads(n)
-            .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+        tch::set_num_threads(n);
     }
-
-    // `.onnx` references `.onnx.data` by relative name → same dir, ORT loads
-    // the external-weights sidecar automatically.
-    builder
-        .commit_from_file(MODEL_PATH)
-        .map_err(|e| anyhow::anyhow!("{:?}", e))
+    
+    info!("Loading TorchScript module from {}", MODEL_PATH);
+    CModule::load(MODEL_PATH).map_err(|e| anyhow::anyhow!("{:?}", e))
 }
 
 // --- main ---

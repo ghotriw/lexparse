@@ -1,0 +1,2 @@
+[env]
+CXXFLAGS = "-Wno-invalid-specialization"
