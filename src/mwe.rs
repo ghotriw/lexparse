@@ -143,23 +143,40 @@ fn phrasal_arc_ok(idxs: &[usize], is_verb: &[bool], heads: &[usize], rels: &[Str
     if !is_verb.get(verb).copied().unwrap_or(false) {
         return false;
     }
-    let Some(&particle) = idxs.get(1) else {
-        return true;
-    };
-    let particle_head = heads.get(particle + 1).copied().unwrap_or(0);
-    let particle_rel = rels.get(particle).map(String::as_str).unwrap_or("");
-    // Direct: particle → verb
-    if particle_head == verb + 1 {
-        // Must be explicitly tagged as compound:prt or advmod.
-        // UD often uses advmod for directional phrasal verbs (e.g., "come out", "run off").
-        return particle_rel == "compound:prt" || particle_rel == "advmod";
+
+    // Heuristic: if the verb has a core particle (compound:prt) attached to it,
+    // any phrasal verb candidate for this verb MUST include that particle.
+    // This prevents false positives where a preposition (case) matches as a particle
+    // while the verb's true particle is ignored (e.g. rejecting "put in" in "put UP their hands IN response").
+    let mut has_prt_child = false;
+    let mut candidate_includes_prt = false;
+    for i in 0..rels.len() {
+        if heads.get(i + 1).copied() == Some(verb + 1) && rels[i] == "compound:prt" {
+            has_prt_child = true;
+            if idxs.contains(&i) {
+                candidate_includes_prt = true;
+            }
+        }
     }
-    // Indirect via case marker: particle → noun → verb.
-    // Exclude `mark` (infinitival `to`) — it attaches to the complement verb,
-    // not to the governing verb, and is not a phrasal-verb particle.
-    particle_head > 0
-        && heads.get(particle_head).copied() == Some(verb + 1)
-        && particle_rel != "mark"
+    if has_prt_child && !candidate_includes_prt {
+        return false;
+    }
+    for &particle in idxs.iter().skip(1) {
+        let particle_head = heads.get(particle + 1).copied().unwrap_or(0);
+        let particle_rel = rels.get(particle).map(String::as_str).unwrap_or("");
+        
+        let direct_ok = particle_head == verb + 1 && (particle_rel == "compound:prt" || particle_rel == "advmod");
+        
+        let indirect_ok = particle_head > 0
+            && heads.get(particle_head).copied() == Some(verb + 1)
+            && particle_rel != "mark";
+            
+        if !direct_ok && !indirect_ok {
+            return false;
+        }
+    }
+    
+    true
 }
 
 pub fn detect(
@@ -201,11 +218,12 @@ pub fn detect(
     let mut cands = Vec::new();
     for &entry_idx in &candidate_entries {
         let entry = &lexicon.entries[entry_idx];
-        let Some(idxs) = matcher::match_entry(&lemmas, upos, words, &entry.elements) else {
+        let is_phrasal = is_phrasal_verb(entry);
+        let Some(idxs) = matcher::match_entry(&lemmas, upos, words, &entry.elements, is_phrasal) else {
             continue;
         };
 
-        if is_phrasal_verb(entry) && !phrasal_arc_ok(&idxs, is_verb, heads, rels) {
+        if is_phrasal && !phrasal_arc_ok(&idxs, is_verb, heads, rels) {
             continue;
         }
 

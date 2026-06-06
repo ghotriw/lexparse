@@ -122,7 +122,7 @@ fn eq(a: &str, b: &str) -> bool {
 /// `elements` -> (fixed_lemmas, gap_limits, slot_types).
 /// `gaps[i]` = max tokens between fixed[i-1] and fixed[i] (`gaps[0]` unused).
 /// `slot_types[i]` = UPOS constraint for that gap; `Any` when no explicit slot.
-fn plan(elements: &[Element]) -> (Vec<String>, Vec<usize>, Vec<SlotType>) {
+fn plan(elements: &[Element], is_phrasal: bool) -> (Vec<String>, Vec<usize>, Vec<SlotType>) {
     let mut fixed = Vec::new();
     let mut gaps = Vec::new();
     let mut slot_types = Vec::new();
@@ -138,7 +138,11 @@ fn plan(elements: &[Element]) -> (Vec<String>, Vec<usize>, Vec<SlotType>) {
                 } else {
                     match slot {
                         Some(t) => { gaps.push(SLOT_MAX); slot_types.push(t); }
-                        None    => { gaps.push(GAP_MAX);  slot_types.push(SlotType::Any); }
+                        None    => { 
+                            let max_gap = if is_phrasal { 5 } else { GAP_MAX };
+                            gaps.push(max_gap);
+                            slot_types.push(SlotType::Any); 
+                        }
                     }
                 }
                 fixed.push(w.clone());
@@ -219,8 +223,9 @@ pub fn match_entry(
     upos: &[String],
     surface: &[String],
     elements: &[Element],
+    is_phrasal: bool,
 ) -> Option<Vec<usize>> {
-    let (fixed, gaps, slot_types) = plan(elements);
+    let (fixed, gaps, slot_types) = plan(elements, is_phrasal);
     if fixed.is_empty() {
         return None;
     }
@@ -334,7 +339,7 @@ mod tests {
     fn matches_contiguous() {
         let elems = [w("spill"), w("the"), w("bean")];
         let sent = lems("he spill the bean today");
-        let idx = match_entry(&sent, &no_upos(sent.len()), &sent, &elems).unwrap();
+        let idx = match_entry(&sent, &no_upos(sent.len()), &sent, &elems, false).unwrap();
         assert_eq!(idx, vec![1, 2, 3]);
     }
 
@@ -344,7 +349,7 @@ mod tests {
         let elems = [w("make"), slot(), w("up"), w("mind")];
         let sent = lems("they make her up mind now");
         let u = upos("X VERB PRON X NOUN X");
-        let idx = match_entry(&sent, &u, &sent, &elems).unwrap();
+        let idx = match_entry(&sent, &u, &sent, &elems, false).unwrap();
         assert_eq!(idx, vec![1, 3, 4]);
     }
 
@@ -352,7 +357,7 @@ mod tests {
     fn no_match_when_gap_too_wide() {
         let elems = [w("kick"), w("bucket")];
         let sent = lems("kick a big old bucket");
-        assert!(match_entry(&sent, &no_upos(sent.len()), &sent, &elems).is_none());
+        assert!(match_entry(&sent, &no_upos(sent.len()), &sent, &elems, false).is_none());
     }
 
     #[test]
@@ -360,7 +365,7 @@ mod tests {
         let elems = [w("kick"), slot(), w("bucket")];
         let sent = lems("kick a big old bucket");
         let u = upos("VERB DET ADJ ADJ NOUN");
-        let idx = match_entry(&sent, &u, &sent, &elems).unwrap();
+        let idx = match_entry(&sent, &u, &sent, &elems, false).unwrap();
         assert_eq!(idx, vec![0, 4]);
     }
 
@@ -368,7 +373,7 @@ mod tests {
     fn prefix_tolerant_eq() {
         let elems = [w("over"), w("moon")];
         let sent = lems("over moons");
-        assert!(match_entry(&sent, &no_upos(sent.len()), &sent, &elems).is_some());
+        assert!(match_entry(&sent, &no_upos(sent.len()), &sent, &elems, false).is_some());
         assert!(eq("moon", "moons"));
         assert!(!eq("go", "gone"));
         assert!(!eq("the", "then"));
@@ -390,7 +395,7 @@ mod tests {
         let elems = [w("fair"), w("play")];
         let sent = lems("fair . play");
         let u = upos("ADJ PUNCT VERB");
-        assert!(match_entry(&sent, &u, &sent, &elems).is_none());
+        assert!(match_entry(&sent, &u, &sent, &elems, false).is_none());
     }
 
     #[test]
@@ -399,7 +404,7 @@ mod tests {
         let elems = [w("so"), w("far"), w("so"), w("good")];
         let sent = lems("so far , so good");
         let u = upos("ADV ADV PUNCT ADV ADJ");
-        assert!(match_entry(&sent, &u, &sent, &elems).is_some());
+        assert!(match_entry(&sent, &u, &sent, &elems, false).is_some());
     }
 
     #[test]
@@ -409,7 +414,7 @@ mod tests {
         let elems = [w("fair"), w("play")];
         let sent = lems("fair , play");
         let u = upos("ADJ PUNCT VERB");
-        assert!(match_entry(&sent, &u, &sent, &elems).is_none());
+        assert!(match_entry(&sent, &u, &sent, &elems, false).is_none());
     }
 
     #[test]
@@ -418,7 +423,7 @@ mod tests {
         let elems = [w("over"), w("board")];
         let sent = lems("over - board");
         let u = upos("ADP PUNCT NOUN");
-        assert!(match_entry(&sent, &u, &sent, &elems).is_some());
+        assert!(match_entry(&sent, &u, &sent, &elems, false).is_some());
     }
 
     #[test]
@@ -427,7 +432,7 @@ mod tests {
         let elems = [slot(), w("far"), slot(), w("good")];
         let sent = lems("so far , so good");
         let u = upos("ADV ADV PUNCT ADV ADJ");
-        assert!(match_entry(&sent, &u, &sent, &elems).is_some());
+        assert!(match_entry(&sent, &u, &sent, &elems, false).is_some());
     }
 
     #[test]
@@ -436,7 +441,7 @@ mod tests {
         let elems = [slot(), w("far"), slot(), w("good")];
         let sent = lems("so far . so good");
         let u = upos("ADV ADV PUNCT ADV ADJ");
-        assert!(match_entry(&sent, &u, &sent, &elems).is_none());
+        assert!(match_entry(&sent, &u, &sent, &elems, false).is_none());
     }
 
     #[test]
@@ -445,7 +450,7 @@ mod tests {
         let elems = [w("about"), w("time")];
         let sent = lems("about four time");
         let u = upos("ADP NUM NOUN");
-        assert!(match_entry(&sent, &u, &sent, &elems).is_none());
+        assert!(match_entry(&sent, &u, &sent, &elems, false).is_none());
     }
 
     #[test]
@@ -453,10 +458,10 @@ mod tests {
         // Separable phrasal verbs: pronoun object / adverb modifier in the gap.
         let elems = [w("wake"), w("up")];
         let sent = lems("wake you up");
-        assert!(match_entry(&sent, &upos("VERB PRON ADP"), &sent, &elems).is_some());
+        assert!(match_entry(&sent, &upos("VERB PRON ADP"), &sent, &elems, false).is_some());
         let sent2 = lems("look quickly around");
         let elems2 = [w("look"), w("around")];
-        assert!(match_entry(&sent2, &upos("VERB ADV ADV"), &sent2, &elems2).is_some());
+        assert!(match_entry(&sent2, &upos("VERB ADV ADV"), &sent2, &elems2, false).is_some());
     }
 
     #[test]
@@ -465,7 +470,7 @@ mod tests {
         let elems = [w("pull"), slot_pron(), w("together")];
         let sent = lems("pull herself together");
         let u = upos("VERB PRON ADV");
-        assert!(match_entry(&sent, &u, &sent, &elems).is_some());
+        assert!(match_entry(&sent, &u, &sent, &elems, false).is_some());
     }
 
     #[test]
@@ -474,7 +479,7 @@ mod tests {
         let elems = [w("pull"), slot_pron(), w("together")];
         let sent = lems("pull a team together");
         let u = upos("VERB DET NOUN ADV");
-        assert!(match_entry(&sent, &u, &sent, &elems).is_none());
+        assert!(match_entry(&sent, &u, &sent, &elems, false).is_none());
     }
 
     #[test]
@@ -483,7 +488,7 @@ mod tests {
         let elems = [w("pull"), slot_pron(), w("together")];
         let sent = lems("pull young volunteer together");
         let u = upos("VERB ADJ NOUN ADV");
-        assert!(match_entry(&sent, &u, &sent, &elems).is_none());
+        assert!(match_entry(&sent, &u, &sent, &elems, false).is_none());
     }
 
     #[test]
@@ -492,7 +497,7 @@ mod tests {
         let elems = [w("pull"), slot_pron(), w("together")];
         let sent = lems("pull together");
         let u = upos("VERB ADV");
-        assert!(match_entry(&sent, &u, &sent, &elems).is_none());
+        assert!(match_entry(&sent, &u, &sent, &elems, false).is_none());
     }
 
     #[test]
@@ -523,6 +528,6 @@ mod tests {
             "room".to_string(),
             "?".to_string(),
         ];
-        assert!(match_entry(&sent, &u, &surface, &elems).is_some());
+        assert!(match_entry(&sent, &u, &surface, &elems, false).is_some());
     }
 }
