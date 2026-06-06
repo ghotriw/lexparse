@@ -169,7 +169,9 @@ fn phrasal_arc_ok(idxs: &[usize], is_verb: &[bool], heads: &[usize], rels: &[Str
         
         let indirect_ok = particle_head > 0
             && heads.get(particle_head).copied() == Some(verb + 1)
-            && particle_rel != "mark";
+            && particle_rel != "mark"
+            && particle_rel != "compound:prt"
+            && particle_rel != "advmod";
             
         if !direct_ok && !indirect_ok {
             return false;
