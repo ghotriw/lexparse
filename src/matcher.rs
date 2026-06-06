@@ -299,7 +299,7 @@ pub fn match_entry(
 
                 let q_is_punct = upos.get(q).map(String::as_str) == Some("PUNCT");
                 let q_surf = surface.get(q).map(String::as_str);
-                let q_is_possessive = q_surf == Some("'s") || q_surf == Some("’s");
+                let q_is_possessive = q_surf == Some("'s") || q_surf == Some("’s") || q_surf == Some("'") || q_surf == Some("’");
                 
                 if !q_is_punct && !q_is_possessive {
                     effective_gap_len += 1;
