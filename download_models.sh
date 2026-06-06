@@ -2,14 +2,16 @@
 set -e
 
 echo "Select model:"
-echo "  1) deberta-v3-xsmall-ewt-gum  (fastest, lowest RAM)"
-echo "  2) deberta-v3-xsmall-ewt      (fastest, lowest RAM)"
-echo "  3) deberta-v3-small-ewt       (faster, less RAM)"
-echo "  4) deberta-v3-base-ewt        (more accurate)"
+echo "  1) deberta-v3-xsmall-ewt-gum        (fastest, lowest RAM)"
+echo "  2) deberta-v3-xsmall-ewt            (fastest, lowest RAM)"
+echo "  3) deberta-v3-small-ewt             (faster, less RAM)"
+echo "  4) deberta-v3-base-ewt              (more accurate)"
+echo "  5) deberta-v3-small-feats-ewt-gum   (FEATS support, EWT+GUM)"
 printf "Choice [1]: "
 read choice
 
 case "${choice}" in
+    5) REPO="ghotriw/deberta-v3-small-biaffine-dep-pos-feats-en-ewt-gum" ;;
     4) REPO="ghotriw/deberta-v3-base-biaffine-dep-pos-en-ewt" ;;
     3) REPO="ghotriw/deberta-v3-small-biaffine-dep-pos-en-ewt" ;;
     2) REPO="ghotriw/deberta-v3-xsmall-biaffine-dep-pos-en-ewt" ;;
