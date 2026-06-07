@@ -681,6 +681,12 @@ pub fn run_inference_batch(
         results.push(Ok(SentenceResult { tokens, mwes }));
     }
 
+    info!(
+        batch_size = b,
+        elapsed_ms = start_time.elapsed().as_millis(),
+        "parsed batch"
+    );
+
     results
 }
 
