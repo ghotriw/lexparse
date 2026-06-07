@@ -2,7 +2,7 @@
 
 Lightweight English NLP microservice: dependency parsing, POS tagging, morphological features (FEATS), and MWE (Multi-Word Expression) detection via slot/gap matching.
 
-Built with Rust + ONNX Runtime.
+Built with Rust + LibTorch.
 
 | Model                         | Size                | HuggingFace                                                                                                                                       |
 | ----------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -167,10 +167,9 @@ The `src/bin/` directory contains several utility scripts:
 
 ## Configuration
 
-| Env var                   | Default        | Description                                 |
-| ------------------------- | -------------- | ------------------------------------------- |
-| `PARSER_ADDR`             | `0.0.0.0:3000` | Listen address                              |
-| `PARSER_IDLE_UNLOAD_SECS` | `300`          | Unload model after N seconds idle           |
-| `PARSER_CPU_ARENA`        | `1`            | ORT arena allocator (set `0` to reduce RSS) |
-| `PARSER_MEM_PATTERN`      | `0`            | ORT memory pattern optimization             |
-| `PARSER_INTRA_THREADS`    | ORT default    | Number of intra-op threads                  |
+| Env var                   | Default          | Description                                 |
+| ------------------------- | ---------------- | ------------------------------------------- |
+| `PARSER_ADDR`             | `0.0.0.0:3000`   | Listen address                              |
+| `PARSER_IDLE_UNLOAD_SECS` | `300`            | Unload model after N seconds idle           |
+| `PARSER_BATCH_SIZE`       | `1`              | Number of sentences to batch during parsing |
+| `PARSER_INTRA_THREADS`    | LibTorch default | Number of intra-op threads                  |
