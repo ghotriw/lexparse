@@ -4,12 +4,11 @@ Lightweight English NLP microservice: dependency parsing, POS tagging, morpholog
 
 Built with Rust + ONNX Runtime.
 
-| Model                         | Size                | HuggingFace                                                                                                                           |
-| ----------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| deberta-v3-**xsmall** ewt+gum | fastest, lowest RAM | [ghotriw/deberta-v3-xsmall-biaffine-dep-pos-en-ewt-gum](https://huggingface.co/ghotriw/deberta-v3-xsmall-biaffine-dep-pos-en-ewt-gum) |
-| deberta-v3-**xsmall** ewt     | fastest, lowest RAM | [ghotriw/deberta-v3-xsmall-biaffine-dep-pos-en-ewt](https://huggingface.co/ghotriw/deberta-v3-xsmall-biaffine-dep-pos-en-ewt)         |
-| deberta-v3-**small** ewt      | faster, less RAM    | [ghotriw/deberta-v3-small-biaffine-dep-pos-en-ewt](https://huggingface.co/ghotriw/deberta-v3-small-biaffine-dep-pos-en-ewt)           |
-| deberta-v3-**base** ewt       | more accurate       | [ghotriw/deberta-v3-base-biaffine-dep-pos-en-ewt](https://huggingface.co/ghotriw/deberta-v3-base-biaffine-dep-pos-en-ewt)             |
+| Model                         | Size                | HuggingFace                                                                                                                                       |
+| ----------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| deberta-v3-**xsmall** ewt+gum | fastest, lowest RAM | [ghotriw/deberta-v3-xsmall-biaffine-dep-pos-feats-en-ewt-gum](https://huggingface.co/ghotriw/deberta-v3-xsmall-biaffine-dep-pos-feats-en-ewt-gum) |
+| deberta-v3-**small** ewt+gum  | faster, less RAM    | [ghotriw/deberta-v3-small-biaffine-dep-pos-feats-en-ewt-gum](https://huggingface.co/ghotriw/deberta-v3-small-biaffine-dep-pos-feats-en-ewt-gum)   |
+<!--| deberta-v3-**base** ewt+gum   | more accurate       | [ghotriw/deberta-v3-base-biaffine-dep-pos-feats-en-ewt-gum](https://huggingface.co/ghotriw/deberta-v3-base-biaffine-dep-pos-feats-en-ewt-gum)     |-->
 
 ## Setup
 
