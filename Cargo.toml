@@ -35,7 +35,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tch = { version = "0.17", features = ["download-libtorch"] }
 tokenizers = { version = "0.19", features = ["hf-hub", "http"] }
 ndarray = "0.17"
 anyhow = "1.0"
@@ -48,3 +47,4 @@ ureq = { version = "2", features = ["json"] }
 tikv-jemallocator = "0.7.0"
 tikv-jemalloc-sys = "0.7.0"
 libc = "0.2"
+ort = { version = "2.0.0-rc.12", features = ["ndarray"] }
