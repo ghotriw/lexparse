@@ -139,7 +139,12 @@ fn plan(elements: &[Element], max_gap: usize) -> (Vec<String>, Vec<usize>, Vec<S
                     match slot {
                         Some(t) => { gaps.push(SLOT_MAX); slot_types.push(t); }
                         None    => { 
-                            gaps.push(max_gap);
+                            let current_k = gaps.len();
+                            if current_k == 1 {
+                                gaps.push(max_gap);
+                            } else {
+                                gaps.push(max_gap.min(1));
+                            }
                             slot_types.push(SlotType::Any); 
                         }
                     }
